@@ -1680,9 +1680,12 @@ RunService.Heartbeat:Connect(function()
 end)
 
 -- // UI
+local ApexVersion = tostring(ApexLibrary.Version or "V3.7 PLUS")
+ApexVersion = ApexVersion:gsub("^APEX_SYS%s*", "")
+
 local MyWindow = ApexLibrary.new({
     Title = "Dandys World",
-    BrandText = "APEX_SYS // RH",
+    BrandText = "Apex Lib // " .. ApexVersion,
     StatusText = "READY",
     AccentColor = Color3.fromRGB(255, 85, 0),
     HideKey = Enum.KeyCode.RightControl
