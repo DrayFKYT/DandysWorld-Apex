@@ -13,14 +13,14 @@
         and loads it automatically. Local copies are only a fallback.
 
     Library URL:
-        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=2
+        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=3
 ]================================================================]--
 
 -- // Apex Library Loader
 -- The version query bypasses executor HTTP caches that still hold the old
 -- library. LayoutRevision below rejects any stale copy that slips through.
-local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=2"
-local MIN_LAYOUT_REVISION = 2
+local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=3"
+local MIN_LAYOUT_REVISION = 3
 
 local function IsPlusLibrary(library)
     return type(library) == "table"
@@ -2027,7 +2027,7 @@ local ApexVersion = tostring(ApexLibrary.Version or "V3.7 PLUS")
 ApexVersion = ApexVersion:gsub("^APEX_SYS%s*", "")
 
 local MyWindow = ApexLibrary.new({
-    Title = "Dandys World",
+    Title = "Dandys World // Menu",
     BrandText = "Apex Lib // " .. ApexVersion,
     StatusText = "READY",
     AccentColor = Color3.fromRGB(255, 85, 0),
