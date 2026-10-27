@@ -481,38 +481,272 @@ local function getRoomFolder(name)
     return nil
 end
 
+-- // Shared room threats (monsters + hazards)
+-- One cache feeds target selection, safety checks, and flight steering so the
+-- whole room is not rescanned every frame. Everything is scoped inside the
+-- table to keep the main chunk under Lua's 200-local limit.
+local Threat = {}
+do
+    local ignored = {
+        RazzleDazzleMonster = true,
+        RodgerMonster = true,
+        BlottMonster = true,
+        SquirmMonster = true,
+    }
+    local cache = {
+        At = 0,
+        MonsterParts = {},
+        HazardParts = {},
+    }
+    local CACHE_TTL = 0.4
+
+    function Threat.IsIgnored(name)
+        return ignored[name] == true
+    end
+
+    function Threat.Refresh(now)
+        now = now or os.clock()
+        if now - cache.At < CACHE_TTL then
+            return cache
+        end
+
+        cache.At = now
+        cache.MonsterParts = {}
+        cache.HazardParts = {}
+
+        local monsters = getRoomFolder("Monsters")
+        if monsters then
+            for _, monster in pairs(monsters:GetChildren()) do
+                if not ignored[monster.Name] then
+                    local part = monster.PrimaryPart or monster:FindFirstChildWhichIsA("BasePart")
+                    if part then
+                        cache.MonsterParts[#cache.MonsterParts + 1] = part
+                    end
+                end
+            end
+        end
+
+        local room = workspace:FindFirstChild("CurrentRoom")
+        if room then
+            for _, descendant in pairs(room:GetDescendants()) do
+                if (descendant.Name == "SproutTendril" or string.find(descendant.Name, "BlotHandZone", 1, true))
+                    and descendant:IsA("BasePart")
+                then
+                    cache.HazardParts[#cache.HazardParts + 1] = descendant
+                end
+            end
+        end
+
+        return cache
+    end
+
+    function Threat.Distances(position, now)
+        local currentCache = Threat.Refresh(now)
+        local nearestMonster = math.huge
+        local nearestHazard = math.huge
+        local monsterPart = nil
+        local hazardPart = nil
+
+        for _, part in pairs(currentCache.MonsterParts) do
+            if part.Parent then
+                local distance = (part.Position - position).Magnitude
+                if distance < nearestMonster then
+                    nearestMonster = distance
+                    monsterPart = part
+                end
+            end
+        end
+
+        for _, part in pairs(currentCache.HazardParts) do
+            if part.Parent then
+                local distance = (part.Position - position).Magnitude
+                if distance < nearestHazard then
+                    nearestHazard = distance
+                    hazardPart = part
+                end
+            end
+        end
+
+        return nearestMonster, monsterPart, nearestHazard, hazardPart
+    end
+
+    function Threat.Nearby(position, monsterRadius, hazardRadius, verticalLimit)
+        local currentCache = Threat.Refresh()
+        verticalLimit = verticalLimit or 24
+
+        for _, part in pairs(currentCache.MonsterParts) do
+            if part.Parent then
+                local dx = part.Position.X - position.X
+                local dz = part.Position.Z - position.Z
+                if (dx * dx + dz * dz) < monsterRadius * monsterRadius
+                    and math.abs(part.Position.Y - position.Y) < verticalLimit
+                then
+                    return true
+                end
+            end
+        end
+
+        for _, part in pairs(currentCache.HazardParts) do
+            if part.Parent then
+                local dx = part.Position.X - position.X
+                local dz = part.Position.Z - position.Z
+                if (dx * dx + dz * dz) < hazardRadius * hazardRadius
+                    and math.abs(part.Position.Y - position.Y) < verticalLimit
+                then
+                    return true
+                end
+            end
+        end
+
+        return false
+    end
+end
+
 local function isAreaSafe(targetPosition)
-    local monsters = getRoomFolder("Monsters")
-    local room = workspace:FindFirstChild("CurrentRoom")
+    local nearestMonster, _, nearestHazard = Threat.Distances(targetPosition)
+    return nearestMonster >= 70 and nearestHazard >= 40
+end
 
-    if monsters then
-        for _, monster in pairs(monsters:GetChildren()) do
-            if monster.Name ~= "RazzleDazzleMonster"
-                and monster.Name ~= "RodgerMonster"
-                and monster.Name ~= "BlottMonster"
-                and monster.Name ~= "SquirmMonster"
-            then
-                local part = monster.PrimaryPart or monster:FindFirstChildWhichIsA("BasePart")
-                if part and (part.Position - targetPosition).Magnitude < 70 then
-                    return false
-                end
-            end
-        end
+-- // Incremental CFrame flight
+-- Every teleport in this script uses this instead of assigning a distant
+-- CFrame in one frame. Movement is smooth, capped per step, and steers around
+-- nearby monsters/hazards. Safety logic cancels an in-flight move by bumping
+-- the sequence counter.
+local Flight = {}
+do
+    local MAX_STEP = 6
+    local DEFAULT_SPEED = 85
+    local TIMEOUT = 25
+    local sequence = 0
+
+    Flight.FarmSpeed = 65
+
+    function Flight.Cancel()
+        sequence = sequence + 1
     end
 
-    if room then
-        for _, descendant in pairs(room:GetDescendants()) do
-            if (descendant.Name == "SproutTendril" or string.find(descendant.Name, "BlotHandZone", 1, true))
-                and descendant:IsA("BasePart")
-            then
-                if (descendant.Position - targetPosition).Magnitude < 40 then
-                    return false
+    function Flight.To(targetPosition, options)
+        if not targetPosition then
+            return false
+        end
+
+        options = options or {}
+        local character = LocalPlayer.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if not root then
+            return false
+        end
+
+        sequence = sequence + 1
+        local currentSequence = sequence
+        local flightCharacter = character
+        local speed = options.Speed or DEFAULT_SPEED
+        local arriveDistance = options.ArriveDistance or 2
+        local timeout = options.Timeout or TIMEOUT
+        local avoidThreats = options.AvoidThreats ~= false
+        local clearance = options.Clearance or 32
+        local startedAt = os.clock()
+        local lastThreatScan = 0
+        local cachedMonsters = {}
+        local cachedHazards = {}
+
+        while sequence == currentSequence do
+            character = LocalPlayer.Character
+            if character ~= flightCharacter then
+                -- Died or respawned mid-flight; do not drag the new
+                -- character toward an old destination.
+                return false
+            end
+            root = character and character:FindFirstChild("HumanoidRootPart")
+            if not root then
+                return false
+            end
+
+            local current = root.Position
+            local delta = targetPosition - current
+            local distance = delta.Magnitude
+            if distance <= arriveDistance then
+                KillVelocity()
+                return true
+            end
+            if os.clock() - startedAt > timeout then
+                return false
+            end
+
+            local now = os.clock()
+            if avoidThreats and now - lastThreatScan >= 0.2 then
+                lastThreatScan = now
+                local cache = Threat.Refresh(now)
+                cachedMonsters = cache.MonsterParts
+                cachedHazards = cache.HazardParts
+            end
+
+            local directionX = delta.X / distance
+            local directionY = delta.Y / distance
+            local directionZ = delta.Z / distance
+
+            -- Steer around threats in the path, but let the last few studs
+            -- close in so a target beside a hazard is still reachable.
+            if avoidThreats and distance > clearance + 6 then
+                local steerX, steerZ = directionX, directionZ
+                local function steerAway(parts, radius)
+                    for _, part in pairs(parts) do
+                        if part.Parent then
+                            local toThreatX = part.Position.X - current.X
+                            local toThreatY = part.Position.Y - current.Y
+                            local toThreatZ = part.Position.Z - current.Z
+                            local forward = toThreatX * directionX + toThreatZ * directionZ
+                            if forward > -radius and forward < distance + radius then
+                                local perpX = toThreatX - directionX * forward
+                                local perpY = toThreatY - directionY * forward
+                                local perpZ = toThreatZ - directionZ * forward
+                                local perpDistance = math.sqrt(perpX * perpX + perpY * perpY + perpZ * perpZ)
+                                if perpDistance < radius then
+                                    local push = (radius - perpDistance) / radius
+                                    if perpDistance > 0.001 then
+                                        steerX = steerX - (perpX / perpDistance) * push * 2
+                                        steerZ = steerZ - (perpZ / perpDistance) * push * 2
+                                    else
+                                        -- Dead-on collision: pick a stable sideways route.
+                                        steerX = steerX - directionZ * push * 2
+                                        steerZ = steerZ + directionX * push * 2
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                steerAway(cachedMonsters, clearance)
+                steerAway(cachedHazards, math.min(clearance, 24))
+                local steerLength = math.sqrt(steerX * steerX + steerZ * steerZ)
+                if steerLength > 0.001 then
+                    directionX = steerX / steerLength
+                    directionZ = steerZ / steerLength
                 end
             end
-        end
-    end
 
-    return true
+            local dt = RunService.Heartbeat:Wait()
+            if sequence ~= currentSequence then
+                return false
+            end
+            if type(dt) ~= "number" or dt <= 0 then
+                dt = 0.03
+            end
+            dt = math.min(dt, 0.1)
+
+            local step = math.min(distance, math.max(speed * dt, 1.5), MAX_STEP)
+            local currentCFrame = root.CFrame
+            local rotation = currentCFrame - currentCFrame.Position
+            root.CFrame = CFrame.new(
+                current.X + directionX * step,
+                current.Y + directionY * step,
+                current.Z + directionZ * step
+            ) * rotation
+            KillVelocity()
+        end
+
+        return false
+    end
 end
 
 local function TeleportTo(object)
@@ -543,9 +777,11 @@ local function TeleportTo(object)
         return
     end
 
-    root.CFrame = targetCFrame + Vector3.new(0, 3, 0)
-    task.wait(0.05)
-    KillVelocity()
+    Flight.To(targetCFrame.Position + Vector3.new(0, 3, 0), {
+        Speed = 90,
+        Clearance = 30,
+        AvoidThreats = true,
+    })
 end
 
 local function TeleportToElevator()
@@ -570,8 +806,11 @@ local function TeleportToElevator()
         return
     end
 
-    root.CFrame = targetCFrame * CFrame.new(0, 3.5, 0)
-    KillVelocity()
+    Flight.To(targetCFrame.Position + Vector3.new(0, 3.5, 0), {
+        Speed = 90,
+        Clearance = 30,
+        AvoidThreats = true,
+    })
 end
 
 local function TeleportToPlayer(targetName)
@@ -598,8 +837,11 @@ local function TeleportToPlayer(targetName)
         return
     end
 
-    root.CFrame = target.CFrame + Vector3.new(0, 3, 0)
-    KillVelocity()
+    Flight.To(target.CFrame.Position + Vector3.new(0, 3, 0), {
+        Speed = 90,
+        Clearance = 30,
+        AvoidThreats = true,
+    })
 end
 
 local function SendMonsterChat()
@@ -1152,13 +1394,25 @@ end)
 -- // Autofarm State
 local lockedGen = nil
 local isInteracting = false
-local safetyLock = false
 local levelReady = false
-local CAMP_CHECK_DISTANCE = 70
-local sproutTeleportTimer = 0
-local teleportStage = 0
 local lastAutofarmTick = 0
 local autofarmWarned = false
+
+-- Safety movement is sticky: one destination, a hold window, and no instant
+-- snap-back when the threat briefly drops out of range.
+local Safety = {
+    Locked = false,
+    Target = nil,
+    TargetGen = nil,
+    Room = nil,
+    Until = 0,
+    StartedAt = 0,
+    DangerActive = false,
+    Relocated = false,
+    Hold = 2.5,
+    Height = 32,
+    Speed = 110,
+}
 
 local function FireProximityPrompt(prompt)
     if not prompt or not prompt.Enabled then
@@ -1187,6 +1441,95 @@ local function GetObjectPosition(object)
     return nil
 end
 
+function Safety.GetAnchor(generator)
+    if not generator then
+        return nil
+    end
+    local point = generator:FindFirstChild("ScrapsAttachPoint", true)
+    if point and point:IsA("BasePart") then
+        return point
+    end
+    return generator.PrimaryPart or generator:FindFirstChildWhichIsA("BasePart")
+end
+
+function Safety.IsCompromised(position)
+    return Threat.Nearby(position, 32, 0, 30)
+        or Threat.Nearby(position, 0, 22, 16)
+end
+
+-- One-time escape target. Generators are the only stable landmarks in every
+-- room, so the farthest one from the current threats wins. This is only used
+-- after a chase refuses to break, at most once per floor.
+function Safety.FindTarget()
+    local generators = getRoomFolder("Generators")
+    local character = LocalPlayer.Character
+    local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
+    local bestPosition = nil
+    local bestGenerator = nil
+    local bestScore = -math.huge
+
+    if generators then
+        for _, generator in pairs(generators:GetChildren()) do
+            local anchor = Safety.GetAnchor(generator)
+            if anchor then
+                local nearestMonster, _, nearestHazard = Threat.Distances(anchor.Position)
+                local threatDistance = math.min(nearestMonster, nearestHazard)
+                local playerDistance = playerRoot and (playerRoot.Position - anchor.Position).Magnitude or 0
+                local score = threatDistance - math.min(playerDistance, 250) * 0.1
+                if score > bestScore then
+                    bestScore = score
+                    bestGenerator = generator
+                    bestPosition = anchor.Position + Vector3.new(0, Safety.Height, 0)
+                end
+            end
+        end
+    end
+
+    if bestPosition then
+        return bestPosition, bestGenerator
+    end
+
+    -- No generators: fly directly away from the nearest threat.
+    local characterPosition = playerRoot and playerRoot.Position or Vector3.new(0, 0, 0)
+    local nearestMonster, monsterPart, nearestHazard, hazardPart = Threat.Distances(characterPosition)
+    local threatPart = nil
+    if nearestMonster <= nearestHazard then
+        threatPart = monsterPart
+    else
+        threatPart = hazardPart
+    end
+    if playerRoot and threatPart then
+        local awayX = playerRoot.Position.X - threatPart.Position.X
+        local awayZ = playerRoot.Position.Z - threatPart.Position.Z
+        local awayLength = math.sqrt(awayX * awayX + awayZ * awayZ)
+        if awayLength < 0.001 then
+            awayX, awayZ = 1, 0
+            awayLength = 1
+        end
+        return playerRoot.Position + Vector3.new(
+            (awayX / awayLength) * 55,
+            Safety.Height,
+            (awayZ / awayLength) * 55
+        ), nil
+    end
+
+    return nil, nil
+end
+
+function Safety.Reset()
+    Safety.Locked = false
+    Safety.Target = nil
+    Safety.TargetGen = nil
+    Safety.Room = nil
+    Safety.DangerActive = false
+    Safety.Relocated = false
+    Safety.Until = 0
+    Safety.StartedAt = 0
+    lockedGen = nil
+    isInteracting = false
+    Flight.Cancel()
+end
+
 -- // Autofarm danger detection / safe reposition
 RunService.Heartbeat:Connect(function()
     if not SessionActive() or not Toggles.Autofarm then
@@ -1201,154 +1544,124 @@ RunService.Heartbeat:Connect(function()
 
     local ok, err = pcall(function()
         local monsters = getRoomFolder("Monsters")
-        local generators = getRoomFolder("Generators")
         local room = workspace:FindFirstChild("CurrentRoom")
         local character = LocalPlayer.Character
         local root = character and character:FindFirstChild("HumanoidRootPart")
 
-        if not monsters or not generators or not room or not root then
+        if not room or not root then
             return
         end
 
+        -- Never carry a safe spot across floors.
+        if Safety.Room ~= nil and Safety.Room ~= room then
+            Safety.Reset()
+        end
+
         local playerPosition = root.Position
-        local dangerDetected = false
-        local isSproutChasing = false
+        -- Hazards are ground-level, so hovering above them should count as
+        -- safe. Monsters get a taller vertical window because they can climb.
+        local dangerDetected = Threat.Nearby(playerPosition, 42, 0, 28)
+            or Threat.Nearby(playerPosition, 0, 30, 16)
 
-        for _, monster in pairs(monsters:GetChildren()) do
-            if monster.Name == "DyleMonster" then
-                local part = monster.PrimaryPart or monster:FindFirstChildWhichIsA("BasePart")
-                if part and (part.Position - playerPosition).Magnitude < 40 then
-                    dangerDetected = true
-                end
-            end
-        end
-
-        for _, monster in pairs(monsters:GetChildren()) do
-            if monster.Name ~= "RazzleDazzleMonster"
-                and monster.Name ~= "RodgerMonster"
-                and monster.Name ~= "BlottMonster"
-            then
-                local chase = monster:FindFirstChild("ChasingValue")
-                if chase and chase.Value
-                    and (chase.Value == LocalPlayer or string.lower(tostring(chase.Value)) == string.lower(LocalPlayer.Name))
-                then
-                    dangerDetected = true
-                    if monster.Name == "SproutMonster" then
-                        isSproutChasing = true
-                    end
-                    break
-                end
-            end
-        end
-
-        if not dangerDetected then
-            for _, descendant in pairs(room:GetDescendants()) do
-                if (descendant.Name == "SproutTendril" or string.find(descendant.Name, "BlotHandZone", 1, true))
-                    and descendant:IsA("BasePart")
-                then
-                    if (descendant.Position - playerPosition).Magnitude < 30 then
-                        dangerDetected = true
-                        break
+        -- A monster actively chasing us stays dangerous even if it is a little
+        -- further away, but only within a sane radius. This prevents a stale
+        -- chase value from keeping safety mode on across the whole room.
+        if not dangerDetected and monsters then
+            for _, monster in pairs(monsters:GetChildren()) do
+                if not Threat.IsIgnored(monster.Name) then
+                    local chase = monster:FindFirstChild("ChasingValue")
+                    if chase and chase.Value
+                        and (chase.Value == LocalPlayer or string.lower(tostring(chase.Value)) == string.lower(LocalPlayer.Name))
+                    then
+                        local part = monster.PrimaryPart or monster:FindFirstChildWhichIsA("BasePart")
+                        if part and (part.Position - playerPosition).Magnitude < 90 then
+                            dangerDetected = true
+                            break
+                        end
                     end
                 end
             end
         end
 
         if dangerDetected then
-            safetyLock = true
-            StopInteraction()
-            isInteracting = false
-            lockedGen = nil
+            Safety.Locked = true
+            Safety.Until = now + Safety.Hold
 
-            local safetyList = {}
-            for _, generator in pairs(generators:GetChildren()) do
-                local point = generator:FindFirstChild("ScrapsAttachPoint", true)
-                if point then
-                    local minDistanceToThreat = 9999
-                    for _, monster in pairs(monsters:GetChildren()) do
-                        if monster.PrimaryPart then
-                            local distance = (point.Position - monster.PrimaryPart.Position).Magnitude
-                            if distance < minDistanceToThreat then
-                                minDistanceToThreat = distance
-                            end
-                        end
-                    end
-                    for _, descendant in pairs(room:GetDescendants()) do
-                        if (descendant.Name == "SproutTendril" or string.find(descendant.Name, "BlotHandZone", 1, true))
-                            and descendant:IsA("BasePart")
-                        then
-                            local distance = (point.Position - descendant.Position).Magnitude
-                            if distance < minDistanceToThreat then
-                                minDistanceToThreat = distance
-                            end
-                        end
-                    end
-                    safetyList[#safetyList + 1] = {
-                        Part = point,
-                        Dist = minDistanceToThreat,
-                        Model = generator
-                    }
-                end
+            if not Safety.DangerActive then
+                Safety.DangerActive = true
+                Safety.StartedAt = now
+                Flight.Cancel()
+                StopInteraction()
+                isInteracting = false
             end
 
-            table.sort(safetyList, function(a, b)
-                return a.Dist > b.Dist
-            end)
-
-            if #safetyList > 0 then
-                local targetData = nil
-                if isSproutChasing then
-                    if teleportStage == 0 then
-                        targetData = safetyList[2] or safetyList[1]
-                        teleportStage = 1
-                        sproutTeleportTimer = tick()
-                    elseif teleportStage == 1 then
-                        if tick() - sproutTeleportTimer >= 1.5 then
-                            targetData = safetyList[1]
-                            teleportStage = 2
-                        else
-                            targetData = safetyList[2] or safetyList[1]
-                        end
-                    else
-                        targetData = safetyList[1]
+            -- Start by hovering directly above the current farm spot. Moving
+            -- sideways at the first sign of danger is what created the old
+            -- generator-to-generator bounce.
+            if not Safety.Target then
+                local anchor = nil
+                if lockedGen and lockedGen.Parent then
+                    local generators = getRoomFolder("Generators")
+                    if generators and lockedGen:IsDescendantOf(generators) then
+                        anchor = Safety.GetAnchor(lockedGen)
                     end
-                else
-                    targetData = safetyList[1]
-                    teleportStage = 0
                 end
+                if not anchor then
+                    -- Stale or unusable farm target: hover where we are
+                    -- instead of flying to another floor's coordinates.
+                    lockedGen = nil
+                end
+                local base = anchor and anchor.Position or playerPosition
+                Safety.Target = base + Vector3.new(0, Safety.Height, 0)
+                Safety.TargetGen = anchor and lockedGen or nil
+                Safety.Room = room
+                Flight.Cancel()
+            end
 
-                if targetData then
-                    local currentCharacter = LocalPlayer.Character
-                    local currentRoot = currentCharacter and currentCharacter:FindFirstChild("HumanoidRootPart")
-                    if currentRoot then
-                        local point = targetData.Part
-                        local model = targetData.Model
-                        local modelHeight = 0
-                        local modelCenterY = 0
-                        if model:IsA("Model") then
-                            local sizeOk, extents = pcall(function()
-                                return model:GetExtentsSize()
-                            end)
-                            local pivotOk, pivot = pcall(function()
-                                return model:GetPivot()
-                            end)
-                            if sizeOk and extents and pivotOk and pivot then
-                                modelHeight = extents.Y
-                                modelCenterY = pivot.Y
-                            end
-                        elseif model:IsA("BasePart") then
-                            modelHeight = model.Size.Y
-                            modelCenterY = model.Position.Y
-                        end
-                        local roofY = modelCenterY + (modelHeight / 2) + 85
-                        currentRoot.CFrame = CFrame.new(point.Position.X, roofY, point.Position.Z)
-                        KillVelocity()
-                    end
+            -- If the chase still has not broken after a few seconds, relocate
+            -- once per floor to the safest generator. One deliberate escape is
+            -- fine; re-picking a target every second is what caused the loop.
+            if not Safety.Relocated and now - Safety.StartedAt >= 8 then
+                Safety.Relocated = true
+                local newTarget, newGen = Safety.FindTarget()
+                if newTarget and newGen ~= Safety.TargetGen
+                    and Safety.Target
+                    and (newTarget - Safety.Target).Magnitude > 30
+                then
+                    Safety.Target = newTarget
+                    Safety.TargetGen = newGen
+                    Safety.Room = room
+                    Flight.Cancel()
                 end
             end
         else
-            safetyLock = false
-            teleportStage = 0
+            Safety.DangerActive = false
+            if Safety.Locked and now >= Safety.Until then
+                local resumeGen = Safety.TargetGen
+                local resumeAnchor = resumeGen and Safety.GetAnchor(resumeGen)
+                local resumeSafe = not resumeAnchor or isAreaSafe(resumeAnchor.Position)
+                local hoverClear = not Safety.Target or not Safety.IsCompromised(Safety.Target)
+                local arrived = not Safety.Target or (root.Position - Safety.Target).Magnitude <= 10
+
+                -- Stay in the air until the hover point and the generator we
+                -- are about to resume at are both clear of threats.
+                if arrived and hoverClear and resumeSafe then
+                    Safety.Locked = false
+                    Flight.Cancel()
+
+                    Safety.Target = nil
+                    Safety.TargetGen = nil
+                    -- Keep Safety.Room for floor-change detection; it is
+                    -- cleared by Safety.Reset or the next floor transition.
+
+                    if resumeGen and resumeGen.Parent then
+                        local attach = Safety.GetAnchor(resumeGen)
+                        if attach and isAreaSafe(attach.Position) then
+                            lockedGen = resumeGen
+                        end
+                    end
+                end
+            end
         end
     end)
 
@@ -1374,6 +1687,9 @@ local function AutofarmStep()
         levelReady = false
         isInteracting = false
         lockedGen = nil
+        if Safety.Room ~= nil and Safety.Room ~= currentRoom then
+            Safety.Reset()
+        end
         return
     end
 
@@ -1382,7 +1698,15 @@ local function AutofarmStep()
         levelReady = true
     end
 
-    if safetyLock then
+    if Safety.Locked then
+        if Safety.Target then
+            Flight.To(Safety.Target, {
+                Speed = Safety.Speed,
+                Clearance = 36,
+                ArriveDistance = 4,
+                Timeout = 15,
+            })
+        end
         return
     end
 
@@ -1418,31 +1742,37 @@ local function AutofarmStep()
         end
     end
 
-    if lockedGen and not safetyLock then
+    if lockedGen and not Safety.Locked then
         local point = lockedGen:FindFirstChild("ScrapsAttachPoint", true)
         if point then
             if (root.Position - point.Position).Magnitude > 5 then
-                root.CFrame = point.CFrame
-                KillVelocity()
                 isInteracting = false
-                task.wait(0.3)
+                local arrived = Flight.To(point.Position, {
+                    Speed = Flight.FarmSpeed,
+                    Clearance = 32,
+                    ArriveDistance = 4,
+                    Timeout = 15,
+                })
+                if Safety.Locked or not arrived then
+                    return
+                end
+                task.wait(0.15)
             end
 
-            while lockedGen and not safetyLock and not isInteracting do
+            -- Retry the prompt a few times instead of wiggling back and forth
+            -- forever while the prompt is still initializing.
+            for _ = 1, 3 do
+                if not lockedGen or Safety.Locked or isInteracting then
+                    break
+                end
                 local prompt = lockedGen:FindFirstChild("ProximityPrompt", true)
                 if prompt and prompt.Enabled then
-                    local fired = FireProximityPrompt(prompt)
-                    if fired then
+                    if FireProximityPrompt(prompt) then
                         isInteracting = true
                     end
                     break
-                else
-                    root.CFrame = root.CFrame * CFrame.new(0, 0, 0.05)
-                    task.wait(0.1)
-                    root.CFrame = root.CFrame * CFrame.new(0, 0, -0.05)
-                    KillVelocity()
                 end
-                task.wait(0.1)
+                task.wait(0.15)
             end
         end
         return
@@ -1463,37 +1793,40 @@ local function AutofarmStep()
         if #capsuleList > 0 then
             capsulesFound = true
             local target = capsuleList[1]
-            if not safetyLock then
+            if not Safety.Locked then
                 local position = GetObjectPosition(target)
                 if position and (root.Position - position).Magnitude > 5 then
-                    root.CFrame = CFrame.new(position)
-                    KillVelocity()
-                    task.wait(0.3)
+                    local arrived = Flight.To(position, {
+                        Speed = Flight.FarmSpeed,
+                        Clearance = 30,
+                        ArriveDistance = 4,
+                        Timeout = 15,
+                    })
+                    if Safety.Locked or not arrived then
+                        return
+                    end
+                    task.wait(0.15)
                 end
 
-                local capsuleGrabbed = false
-                while target.Parent ~= nil and not safetyLock and not capsuleGrabbed do
+                for _ = 1, 8 do
+                    if target.Parent == nil or Safety.Locked then
+                        break
+                    end
                     local prompt = target:FindFirstChild("ProximityPrompt", true)
                     if prompt and prompt.Enabled then
-                        local fired = FireProximityPrompt(prompt)
-                        if fired then
-                            capsuleGrabbed = true
+                        if FireProximityPrompt(prompt) then
                             task.wait(0.2)
                         end
-                    else
-                        root.CFrame = root.CFrame * CFrame.new(0, 0, 0.05)
-                        task.wait(0.1)
-                        root.CFrame = root.CFrame * CFrame.new(0, 0, -0.05)
-                        KillVelocity()
+                        break
                     end
-                    task.wait(0.1)
+                    task.wait(0.15)
                 end
             end
             return
         end
     end
 
-    if not incompleteGensFound and not capsulesFound and not safetyLock then
+    if not incompleteGensFound and not capsulesFound and not Safety.Locked then
         local elevators = workspace:FindFirstChild("Elevators")
         local elevator = elevators and elevators:FindFirstChild("Elevator")
         if elevator then
@@ -1503,10 +1836,16 @@ local function AutofarmStep()
             elseif elevator:IsA("BasePart") then
                 targetCFrame = elevator.CFrame
             end
-            if targetCFrame and (root.Position - targetCFrame.Position).Magnitude > 3 then
-                root.CFrame = targetCFrame * CFrame.new(0, 3.5, 0)
-                KillVelocity()
-                task.wait(2)
+            if targetCFrame then
+                local destination = targetCFrame.Position + Vector3.new(0, 3.5, 0)
+                if (root.Position - destination).Magnitude > 3 then
+                    Flight.To(destination, {
+                        Speed = Flight.FarmSpeed,
+                        Clearance = 30,
+                        ArriveDistance = 3,
+                        Timeout = 15,
+                    })
+                end
             end
         end
     end
@@ -1887,12 +2226,12 @@ local TabDefinitions = {
             tab:CreateSectionLabel("OBJECT TELEPORTS")
             TeleportList = tab:CreateListCard(
                 "LIVE TELEPORT LIST",
-                "Click to teleport. Monsters and hazards are read-only.",
+                "Click to fly there. Monsters and hazards are read-only.",
                 250
             )
             tab:CreateButton(
                 "TELEPORT_TO_ELEVATOR",
-                "Move to the elevator if one exists in the current room.",
+                "Fly to the elevator if one exists in the current room.",
                 TeleportToElevator
             )
             tab:CreateReadMeCard(
@@ -1921,6 +2260,7 @@ local TabDefinitions = {
                     Toggles.Autofarm = state
                     SaveScriptConfig()
                     if not state then
+                        pcall(Safety.Reset)
                         pcall(StopInteraction)
                     end
                 end
@@ -2101,6 +2441,8 @@ MyWindow:RegisterUnloadCallback(function()
     Toggles.AutoChat = false
     Toggles.InfStamina = false
     Toggles.FullBright = false
+    pcall(Safety.Reset)
+    pcall(StopInteraction)
     pcall(UpdateLighting)
     ClearAllESP()
     if ESPFolder and ESPFolder.Parent then

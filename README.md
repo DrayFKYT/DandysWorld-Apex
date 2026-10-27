@@ -18,6 +18,10 @@ The interface is provided by [Apex-Gui-library](https://github.com/DrayFKYT/Apex
 https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua
 ```
 
+## Movement
+
+All teleports use the same incremental CFrame flight: capped steps, orientation preserved, with steering around nearby monsters and hazards. Autofarm safety hovers above the current farm spot, waits for the generator to be clear, and allows at most one relocation per floor.
+
 ## Notes
 
 - Default toggle key: `RightControl`
