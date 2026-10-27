@@ -20,7 +20,9 @@ https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/Apex
 
 ## Movement
 
-All teleports use the same incremental CFrame flight: capped steps, orientation preserved, with steering around nearby monsters and hazards. Autofarm safety hovers above the current farm spot, waits for the generator to be clear, and allows at most one relocation per floor.
+All teleports use the same incremental CFrame flight: capped steps and orientation preserved. Static walls are routed with `PathfindingService`; the local fallback follows wall faces with three-ray probes instead of crossing them. Monsters and hazards are steered around with a clearance radius, so passing near them is allowed but touching is not.
+
+Autofarm safety runs away from the current attacker (or the combined direction of all attackers). Monsters behind walls cannot see the player, so cover can end a chase. Escape points are wall-clamped, refreshed when danger gets close, and prefer breaking line of sight. Safety holds for 2.5 seconds at a 12-stud altitude and relocates the resumed generator at most once per floor.
 
 ## Notes
 

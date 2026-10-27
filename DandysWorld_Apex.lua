@@ -485,6 +485,7 @@ end
 -- One cache feeds target selection, safety checks, and flight steering so the
 -- whole room is not rescanned every frame. Everything is scoped inside the
 -- table to keep the main chunk under Lua's 200-local limit.
+local Nav
 local Threat = {}
 do
     local ignored = {
@@ -495,6 +496,7 @@ do
     }
     local cache = {
         At = 0,
+        Monsters = {},
         MonsterParts = {},
         HazardParts = {},
     }
@@ -511,6 +513,7 @@ do
         end
 
         cache.At = now
+        cache.Monsters = {}
         cache.MonsterParts = {}
         cache.HazardParts = {}
 
@@ -521,6 +524,11 @@ do
                     local part = monster.PrimaryPart or monster:FindFirstChildWhichIsA("BasePart")
                     if part then
                         cache.MonsterParts[#cache.MonsterParts + 1] = part
+                        cache.Monsters[#cache.Monsters + 1] = {
+                            Model = monster,
+                            Part = part,
+                            Chasing = monster:FindFirstChild("ChasingValue"),
+                        }
                     end
                 end
             end
@@ -600,18 +608,537 @@ do
 
         return false
     end
+
+    function Threat.GetMonsters()
+        return Threat.Refresh().Monsters
+    end
+
+    function Threat.GetHazards()
+        return Threat.Refresh().HazardParts
+    end
+
+    function Threat.GetPartRadius(part)
+        local size = part and part.Size
+        if not size then
+            return 0
+        end
+        return math.max(size.X, size.Z) * 0.5
+    end
+
+    function Threat.IsChasingPlayer(entry)
+        local chase = entry and entry.Chasing
+        if not chase or not chase.Value then
+            return false
+        end
+        if chase.Value == LocalPlayer then
+            return true
+        end
+        return string.lower(tostring(chase.Value)) == string.lower(LocalPlayer.Name)
+    end
+
+    -- A monster is a threat when it is actively chasing us or when it has a
+    -- clear line of sight inside its vision range. Walls therefore hide us:
+    -- proximity alone no longer drags the autofarm away from cover.
+    function Threat.GetAttackers(position, radius)
+        local currentCache = Threat.Refresh()
+        local attackers = {}
+        radius = radius or 75
+
+        for _, entry in ipairs(currentCache.Monsters) do
+            local part = entry.Part
+            if part and part.Parent then
+                local dx = part.Position.X - position.X
+                local dz = part.Position.Z - position.Z
+                local dy = part.Position.Y - position.Y
+                local flat = math.sqrt(dx * dx + dz * dz)
+                local distance = math.sqrt(flat * flat + dy * dy)
+                if distance <= radius and math.abs(dy) <= 36 then
+                    local chasing = Threat.IsChasingPlayer(entry)
+                    local visible = false
+                    if flat <= 60 and Nav then
+                        visible = Nav.HasLineOfSight(
+                            part.Position + Vector3.new(0, 2, 0),
+                            position
+                        )
+                    end
+                    if chasing or visible then
+                        attackers[#attackers + 1] = {
+                            Part = part,
+                            Model = entry.Model,
+                            Distance = distance,
+                            Visible = visible,
+                            Chasing = chasing,
+                        }
+                    end
+                end
+            end
+        end
+
+        return attackers
+    end
+
+    -- Weighted run-away vector. Closer monsters push harder; when several
+    -- monsters are attacking, their vectors combine into one escape direction.
+    function Threat.GetFleeVector(position, attackers)
+        local x, z = 0, 0
+        local nearest = math.huge
+        local nearestX, nearestZ = 1, 0
+
+        for _, entry in ipairs(attackers or {}) do
+            local part = entry.Part
+            if part and part.Parent then
+                local dx = position.X - part.Position.X
+                local dz = position.Z - part.Position.Z
+                local distance = math.sqrt(dx * dx + dz * dz)
+                if distance < 0.01 then
+                    dx, dz, distance = 1, 0, 1
+                end
+                if distance < nearest then
+                    nearest = distance
+                    nearestX, nearestZ = dx / distance, dz / distance
+                end
+                local weight = 1 + math.max(0, 36 - distance) / 18
+                x = x + (dx / distance) * weight
+                z = z + (dz / distance) * weight
+            end
+        end
+
+        local length = math.sqrt(x * x + z * z)
+        if length < 0.01 then
+            return nearestX, nearestZ
+        end
+        return x / length, z / length
+    end
+end
+
+-- // Navigation, line of sight, and wall-aware steering
+-- PathfindingService supplies the route around static walls. Flight still
+-- probes every step and steers around whatever the pathfinder could not see:
+-- moving monsters, hazards, and corners. Sight rays are separate so a monster
+-- behind a wall does not count as seeing us.
+Nav = {}
+do
+    local WALL_RADIUS = 2.4
+    local WALL_OFFSETS = { 0, 1, -1 }
+    local WALL_ANGLES = { 0, 25, -25, 50, -50, 75, -75, 100, -100, 125, -125, 150, -150 }
+    local ESCAPE_ANGLES = { 0, 20, -20, 40, -40, 60, -60, 80, -80, 100, -100, 120, -120, 150, -150, 180 }
+
+    local function atan2(y, x)
+        if math.atan2 then
+            return math.atan2(y, x)
+        end
+        return math.atan(y, x)
+    end
+
+    local function addIgnore(list, object)
+        if object then
+            list[#list + 1] = object
+        end
+    end
+
+    function Nav.GetRayParams(forSight)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.IgnoreWater = true
+        params.RespectCanCollide = true
+
+        local ignore = {}
+        addIgnore(ignore, LocalPlayer.Character)
+        local room = workspace:FindFirstChild("CurrentRoom")
+        if room then
+            addIgnore(ignore, room:FindFirstChild("Monsters"))
+            addIgnore(ignore, room:FindFirstChild("Items"))
+        end
+        addIgnore(ignore, workspace:FindFirstChild("InGamePlayers"))
+
+        if forSight then
+            for _, hazard in ipairs(Threat.GetHazards()) do
+                addIgnore(ignore, hazard)
+            end
+        end
+
+        params.FilterDescendantsInstances = ignore
+        return params
+    end
+
+    local function raycast(origin, delta, params)
+        if type(workspace.Raycast) ~= "function" then
+            return nil
+        end
+        local ok, result = pcall(function()
+            return workspace:Raycast(origin, delta, params)
+        end)
+        if ok then
+            return result
+        end
+        return nil
+    end
+
+    -- True when no wall blocks the segment. Monsters, players, items and
+    -- hazards are ignored so this answers "can they see each other?" only.
+    function Nav.HasLineOfSight(from, to)
+        if type(workspace.Raycast) ~= "function" then
+            return true
+        end
+        local delta = to - from
+        if delta.Magnitude < 0.05 then
+            return true
+        end
+        return raycast(from, delta, Nav.GetRayParams(true)) == nil
+    end
+
+    -- Three parallel probes approximate the character capsule. Returns the
+    -- distance available before a wall, whether the full probe was clear,
+    -- and the normal of the closest hit for wall following.
+    function Nav.Probe(origin, direction, distance, radius)
+        if type(workspace.Raycast) ~= "function" then
+            return distance, true, nil
+        end
+
+        local params = Nav.GetRayParams(false)
+        local side = Vector3.new(-direction.Z, 0, direction.X) * (radius or WALL_RADIUS)
+        local shortest = distance
+        local shortestNormal = nil
+
+        for _, offset in ipairs(WALL_OFFSETS) do
+            local shift = side * offset
+            local hit = raycast(origin + shift, direction * distance, params)
+            if hit and hit.Distance < shortest then
+                shortest = hit.Distance
+                shortestNormal = hit.Normal
+            end
+        end
+
+        shortest = math.max(0, shortest)
+        return shortest, shortest >= distance - 0.2, shortestNormal
+    end
+
+    function Nav.SegmentClear(from, to, radius)
+        local delta = to - from
+        local length = delta.Magnitude
+        if length < 0.01 then
+            return true
+        end
+        local direction = delta * (1 / length)
+        local _, clear = Nav.Probe(from, direction, length, radius)
+        return clear
+    end
+
+    -- Pick the closest clear heading to the desired direction. When a wall
+    -- blocks the way, follow the wall's tangent instead of aiming at the
+    -- goal. Preferred keeps the same side of the wall while rounding a
+    -- corner, so the route does not flip back and forth.
+    function Nav.AvoidWalls(current, desired, goal, distance, threatParts, threatClearance, preferred)
+        local available, clear, hitNormal = Nav.Probe(
+            current,
+            desired,
+            distance,
+            WALL_RADIUS
+        )
+        if clear then
+            return desired, available, false
+        end
+
+        local clearance = threatClearance or 18
+        local goalX, goalZ = 0, 0
+        local goalLength = 0
+        if goal then
+            goalX = goal.X - current.X
+            goalZ = goal.Z - current.Z
+            goalLength = math.sqrt(goalX * goalX + goalZ * goalZ)
+        end
+
+        local normalX, normalZ = 0, 0
+        if hitNormal then
+            normalX = hitNormal.X
+            normalZ = hitNormal.Z
+            local normalLength = math.sqrt(normalX * normalX + normalZ * normalZ)
+            if normalLength > 0.1 then
+                normalX = normalX / normalLength
+                normalZ = normalZ / normalLength
+            else
+                normalLength = 0
+            end
+            if normalLength <= 0.1 then
+                normalX, normalZ = 0, 0
+            end
+        end
+
+        if normalX ~= 0 or normalZ ~= 0 then
+            -- Keep the established wall side while it is still a tangent
+            -- along the same surface and remains walkable.
+            if preferred then
+                local pX, pZ = preferred.X, preferred.Z
+                local pLength = math.sqrt(pX * pX + pZ * pZ)
+                if pLength > 0.1 then
+                    pX, pZ = pX / pLength, pZ / pLength
+                    local parallel = math.abs(pX * normalX + pZ * normalZ)
+                    if parallel < 0.5 then
+                        local pDirection = Vector3.new(pX, 0, pZ)
+                        local pAvailable, pClear = Nav.Probe(
+                            current,
+                            pDirection,
+                            distance,
+                            WALL_RADIUS
+                        )
+                        if pClear or pAvailable > 1.5 then
+                            return pDirection, pAvailable, true
+                        end
+                    end
+                end
+            end
+
+            local tangentX, tangentZ = -normalZ, normalX
+            local tangentDot = 0
+            if goalLength > 0.01 then
+                tangentDot = tangentX * goalX + tangentZ * goalZ
+            end
+            if tangentDot < 0 then
+                tangentX, tangentZ = -tangentX, -tangentZ
+            end
+
+            local tangent = Vector3.new(tangentX, 0, tangentZ)
+            local tangentAvailable, tangentClear = Nav.Probe(
+                current,
+                tangent,
+                distance,
+                WALL_RADIUS
+            )
+            if tangentClear or tangentAvailable > 1.5 then
+                return tangent, tangentAvailable, true
+            end
+
+            local other = Vector3.new(-tangentX, 0, -tangentZ)
+            local otherAvailable, otherClear = Nav.Probe(
+                current,
+                other,
+                distance,
+                WALL_RADIUS
+            )
+            if otherClear or otherAvailable > 1.5 then
+                return other, otherAvailable, true
+            end
+        end
+
+        -- Wedged between walls: fall back to the widest nearby heading,
+        -- using progress toward the goal as the tie breaker.
+        local baseAngle = atan2(desired.Z, desired.X)
+        local candidates = {}
+        local bestAvailable = 0
+
+        for _, offset in ipairs(WALL_ANGLES) do
+            local angle = baseAngle + math.rad(offset)
+            local direction = Vector3.new(math.cos(angle), 0, math.sin(angle))
+            local probeAvailable = Nav.Probe(
+                current,
+                direction,
+                distance,
+                WALL_RADIUS
+            )
+            if probeAvailable > 0.75 then
+                candidates[#candidates + 1] = {
+                    Direction = direction,
+                    Available = probeAvailable,
+                }
+                local usable = math.min(probeAvailable, distance)
+                if usable > bestAvailable then
+                    bestAvailable = usable
+                end
+            end
+        end
+
+        if #candidates == 0 then
+            return nil, 0, true
+        end
+
+        local required = math.max(0.75, bestAvailable - 2)
+        local bestDirection = nil
+        local bestProbeAvailable = 0
+        local bestScore = -math.huge
+
+        for _, candidate in ipairs(candidates) do
+            local direction = candidate.Direction
+            local probeAvailable = candidate.Available
+            if math.min(probeAvailable, distance) >= required then
+                local score = math.min(probeAvailable, distance) * 2
+                    + (direction.X * desired.X + direction.Z * desired.Z) * 10
+                if goalLength > 0.01 then
+                    score = score
+                        + ((direction.X * goalX + direction.Z * goalZ) / goalLength) * 5
+                end
+
+                local checkDistance = math.min(probeAvailable, 14)
+                local checkX = current.X + direction.X * checkDistance
+                local checkZ = current.Z + direction.Z * checkDistance
+                for _, part in ipairs(threatParts or {}) do
+                    if part.Parent then
+                        local dx = part.Position.X - checkX
+                        local dz = part.Position.Z - checkZ
+                        local flat = math.sqrt(dx * dx + dz * dz)
+                        local radius = clearance + Threat.GetPartRadius(part)
+                        if flat < radius then
+                            score = score - (radius - flat) * 3
+                        end
+                    end
+                end
+
+                if score > bestScore then
+                    bestScore = score
+                    bestDirection = direction
+                    bestProbeAvailable = probeAvailable
+                end
+            end
+        end
+
+        if not bestDirection then
+            return nil, 0, true
+        end
+        return bestDirection, bestProbeAvailable, true
+    end
+
+    -- Static route around walls. Direct routes skip pathfinding entirely.
+    function Nav.BuildPath(from, to, options)
+        options = options or {}
+        if Nav.SegmentClear(from, to, WALL_RADIUS) then
+            return { to }
+        end
+
+        local hover = options.Hover or 3
+        local points = {}
+        local ok = pcall(function()
+            local pathService = game:GetService("PathfindingService")
+            local path = pathService:CreatePath({
+                AgentRadius = 3,
+                AgentHeight = 6,
+                AgentCanJump = true,
+                AgentCanClimb = false,
+                WaypointSpacing = 6,
+            })
+            path:ComputeAsync(
+                from - Vector3.new(0, hover, 0),
+                to - Vector3.new(0, hover, 0)
+            )
+            if path.Status == Enum.PathStatus.Success then
+                local waypoints = path:GetWaypoints()
+                for index = 2, #waypoints do
+                    local point = waypoints[index].Position
+                    points[#points + 1] = Vector3.new(
+                        point.X,
+                        point.Y + hover,
+                        point.Z
+                    )
+                end
+            end
+        end)
+
+        if not ok or #points == 0 then
+            return { to }
+        end
+
+        local last = points[#points]
+        if (last - to).Magnitude > 1 and Nav.SegmentClear(last, to, WALL_RADIUS) then
+            points[#points + 1] = to
+        end
+
+        -- Smooth the path without cutting through a wall.
+        local simplified = {}
+        local anchor = from
+        local index = 1
+        while index <= #points do
+            local chosen = index
+            for candidate = #points, index, -1 do
+                if Nav.SegmentClear(anchor, points[candidate], WALL_RADIUS) then
+                    chosen = candidate
+                    break
+                end
+            end
+            simplified[#simplified + 1] = points[chosen]
+            anchor = points[chosen]
+            index = chosen + 1
+        end
+
+        return simplified
+    end
+
+    -- Run directly away from the current attackers. Candidates are clamped
+    -- before the first wall and scored by distance, threat clearance, and
+    -- whether the endpoint breaks line of sight.
+    function Nav.FindEscapePoint(position, attackers, hover)
+        local baseX, baseZ = Threat.GetFleeVector(position, attackers)
+        local baseAngle = atan2(baseZ, baseX)
+        local hazards = Threat.GetHazards()
+        local best = nil
+        local bestScore = -math.huge
+
+        for _, offset in ipairs(ESCAPE_ANGLES) do
+            local angle = baseAngle + math.rad(offset)
+            local direction = Vector3.new(math.cos(angle), 0, math.sin(angle))
+            local available = Nav.Probe(position, direction, 68, WALL_RADIUS)
+            local travel = math.min(56, math.max(0, available - 5))
+
+            if travel >= 16 then
+                local endpoint = position
+                    + Vector3.new(direction.X * travel, hover or 0, direction.Z * travel)
+                local score = travel * 1.5
+                    + (direction.X * baseX + direction.Z * baseZ) * 22
+
+                for _, entry in ipairs(attackers or {}) do
+                    local part = entry.Part
+                    if part and part.Parent then
+                        local dx = endpoint.X - part.Position.X
+                        local dz = endpoint.Z - part.Position.Z
+                        local flat = math.sqrt(dx * dx + dz * dz)
+                        local radius = 22 + Threat.GetPartRadius(part)
+                        if flat < radius then
+                            score = score - (radius - flat) * 4
+                        end
+                        if Nav.HasLineOfSight(
+                            part.Position + Vector3.new(0, 2, 0),
+                            endpoint
+                        ) then
+                            score = score - 6
+                        else
+                            score = score + 8
+                        end
+                    end
+                end
+
+                for _, hazard in ipairs(hazards) do
+                    if hazard.Parent then
+                        local dx = endpoint.X - hazard.Position.X
+                        local dz = endpoint.Z - hazard.Position.Z
+                        local flat = math.sqrt(dx * dx + dz * dz)
+                        if flat < 18 then
+                            score = score - (18 - flat) * 3
+                        end
+                    end
+                end
+
+                if score > bestScore then
+                    bestScore = score
+                    best = endpoint
+                end
+            end
+        end
+
+        return best
+    end
 end
 
 local function isAreaSafe(targetPosition)
-    local nearestMonster, _, nearestHazard = Threat.Distances(targetPosition)
-    return nearestMonster >= 70 and nearestHazard >= 40
+    if #Threat.GetAttackers(targetPosition, 55) > 0 then
+        return false
+    end
+    local _, _, nearestHazard = Threat.Distances(targetPosition)
+    return nearestHazard >= 35
 end
 
 -- // Incremental CFrame flight
 -- Every teleport in this script uses this instead of assigning a distant
--- CFrame in one frame. Movement is smooth, capped per step, and steers around
--- nearby monsters/hazards. Safety logic cancels an in-flight move by bumping
--- the sequence counter.
+-- CFrame in one frame. Movement is smooth, capped per step, follows a
+-- wall-aware path, and steers around visible monsters/hazards. Sight is
+-- blocked by walls, so a monster behind a wall does not pull the route.
+-- Safety logic cancels an in-flight move by bumping the sequence counter.
 local Flight = {}
 do
     local MAX_STEP = 6
@@ -623,6 +1150,74 @@ do
 
     function Flight.Cancel()
         sequence = sequence + 1
+    end
+
+    local function normalize2(x, z)
+        local length = math.sqrt(x * x + z * z)
+        if length < 0.0001 then
+            return 1, 0, 0
+        end
+        return x / length, z / length, length
+    end
+
+    local function isThreatVisible(part, position)
+        if not part or not part.Parent then
+            return false
+        end
+        local dx = part.Position.X - position.X
+        local dz = part.Position.Z - position.Z
+        if (dx * dx + dz * dz) > 3600 then
+            return false
+        end
+        return Nav.HasLineOfSight(
+            part.Position + Vector3.new(0, 1.5, 0),
+            position
+        )
+    end
+
+    local function steerThreats(current, directionX, directionZ, remaining, monsters, hazards, clearance)
+        local steerX, steerZ = directionX, directionZ
+
+        local function apply(parts, baseClearance)
+            for _, part in ipairs(parts) do
+                if part.Parent and isThreatVisible(part, current) then
+                    local toX = part.Position.X - current.X
+                    local toZ = part.Position.Z - current.Z
+                    local flat = math.sqrt(toX * toX + toZ * toZ)
+                    local radius = baseClearance + Threat.GetPartRadius(part)
+                    if flat < radius + 10 then
+                        local forward = toX * directionX + toZ * directionZ
+                        if forward > -8 and forward < remaining + radius then
+                            local awayWeight = (radius + 10 - flat) / (radius + 10)
+                            if flat > 0.01 then
+                                steerX = steerX - (toX / flat) * awayWeight * 1.8
+                                steerZ = steerZ - (toZ / flat) * awayWeight * 1.8
+                            end
+
+                            local perpX = toX - directionX * forward
+                            local perpZ = toZ - directionZ * forward
+                            local perpDistance = math.sqrt(perpX * perpX + perpZ * perpZ)
+                            if perpDistance < radius then
+                                local push = (radius - perpDistance) / radius
+                                if perpDistance > 0.01 then
+                                    steerX = steerX - (perpX / perpDistance) * push * 2.4
+                                    steerZ = steerZ - (perpZ / perpDistance) * push * 2.4
+                                else
+                                    -- Dead-on collision: pick a stable side.
+                                    steerX = steerX - directionZ * push * 3
+                                    steerZ = steerZ + directionX * push * 3
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        apply(monsters, clearance)
+        apply(hazards, math.min(clearance, 10))
+        local x, z = normalize2(steerX, steerZ)
+        return x, z
     end
 
     function Flight.To(targetPosition, options)
@@ -644,11 +1239,20 @@ do
         local arriveDistance = options.ArriveDistance or 2
         local timeout = options.Timeout or TIMEOUT
         local avoidThreats = options.AvoidThreats ~= false
-        local clearance = options.Clearance or 32
+        local clearance = options.Clearance or 18
+        local hover = options.Hover or 3
         local startedAt = os.clock()
         local lastThreatScan = 0
         local cachedMonsters = {}
         local cachedHazards = {}
+
+        local waypoints = Nav.BuildPath(root.Position, targetPosition, { Hover = hover })
+        local waypointIndex = 1
+        local lastProgressAt = startedAt
+        local lastProgressPosition = root.Position
+        local lastRepathAt = startedAt
+        local lastAvoidDirection = nil
+        local lastAvoidAt = 0
 
         while sequence == currentSequence do
             character = LocalPlayer.Character
@@ -663,9 +1267,8 @@ do
             end
 
             local current = root.Position
-            local delta = targetPosition - current
-            local distance = delta.Magnitude
-            if distance <= arriveDistance then
+            local targetDelta = targetPosition - current
+            if targetDelta.Magnitude <= arriveDistance then
                 KillVelocity()
                 return true
             end
@@ -673,76 +1276,141 @@ do
                 return false
             end
 
-            local now = os.clock()
-            if avoidThreats and now - lastThreatScan >= 0.2 then
-                lastThreatScan = now
-                local cache = Threat.Refresh(now)
-                cachedMonsters = cache.MonsterParts
-                cachedHazards = cache.HazardParts
+            local waypoint = waypoints[waypointIndex]
+            while waypoint
+                and (waypoint - current).Magnitude <= math.max(2.5, arriveDistance)
+            do
+                waypointIndex = waypointIndex + 1
+                waypoint = waypoints[waypointIndex]
             end
 
-            local directionX = delta.X / distance
-            local directionY = delta.Y / distance
-            local directionZ = delta.Z / distance
+            local moveGoal = waypoint or targetPosition
+            local delta = moveGoal - current
+            local distance = delta.Magnitude
 
-            -- Steer around threats in the path, but let the last few studs
-            -- close in so a target beside a hazard is still reachable.
-            if avoidThreats and distance > clearance + 6 then
-                local steerX, steerZ = directionX, directionZ
-                local function steerAway(parts, radius)
-                    for _, part in pairs(parts) do
-                        if part.Parent then
-                            local toThreatX = part.Position.X - current.X
-                            local toThreatY = part.Position.Y - current.Y
-                            local toThreatZ = part.Position.Z - current.Z
-                            local forward = toThreatX * directionX + toThreatZ * directionZ
-                            if forward > -radius and forward < distance + radius then
-                                local perpX = toThreatX - directionX * forward
-                                local perpY = toThreatY - directionY * forward
-                                local perpZ = toThreatZ - directionZ * forward
-                                local perpDistance = math.sqrt(perpX * perpX + perpY * perpY + perpZ * perpZ)
-                                if perpDistance < radius then
-                                    local push = (radius - perpDistance) / radius
-                                    if perpDistance > 0.001 then
-                                        steerX = steerX - (perpX / perpDistance) * push * 2
-                                        steerZ = steerZ - (perpZ / perpDistance) * push * 2
-                                    else
-                                        -- Dead-on collision: pick a stable sideways route.
-                                        steerX = steerX - directionZ * push * 2
-                                        steerZ = steerZ + directionX * push * 2
-                                    end
-                                end
-                            end
+            if distance < 0.05 then
+                if waypoint then
+                    waypointIndex = waypointIndex + 1
+                else
+                    KillVelocity()
+                    return true
+                end
+            else
+                local now = os.clock()
+                if avoidThreats and now - lastThreatScan >= 0.2 then
+                    lastThreatScan = now
+                    local cache = Threat.Refresh(now)
+                    cachedMonsters = cache.MonsterParts
+                    cachedHazards = cache.HazardParts
+                end
+
+                local flatLength = math.sqrt(delta.X * delta.X + delta.Z * delta.Z)
+                local directionX, directionZ = 0, 0
+                if flatLength > 0.01 then
+                    directionX = delta.X / flatLength
+                    directionZ = delta.Z / flatLength
+                end
+
+                -- Run away from visible threats and give them a wide berth,
+                -- but still allow passing at a safe distance.
+                if avoidThreats and flatLength > 0.01 then
+                    directionX, directionZ = steerThreats(
+                        current,
+                        directionX,
+                        directionZ,
+                        distance,
+                        cachedMonsters,
+                        cachedHazards,
+                        clearance
+                    )
+                end
+
+                local moveX, moveZ = directionX, directionZ
+                local available = nil
+                if flatLength > 0.01 then
+                    local probeDistance = math.max(MAX_STEP + 3, 7)
+                    local wallDirection, wallAvailable, avoiding = Nav.AvoidWalls(
+                        current,
+                        Vector3.new(directionX, 0, directionZ),
+                        moveGoal,
+                        probeDistance,
+                        cachedMonsters,
+                        clearance,
+                        lastAvoidDirection
+                    )
+                    if wallDirection then
+                        moveX = wallDirection.X
+                        moveZ = wallDirection.Z
+                        available = wallAvailable
+                        if avoiding then
+                            -- Remember which side of the wall we picked so a
+                            -- corner is rounded in one direction instead of
+                            -- zig-zagging between both sides.
+                            lastAvoidDirection = Vector3.new(
+                                wallDirection.X,
+                                0,
+                                wallDirection.Z
+                            )
+                            lastAvoidAt = now
+                        elseif lastAvoidDirection and now - lastAvoidAt > 1 then
+                            lastAvoidDirection = nil
                         end
+                    else
+                        moveX, moveZ = 0, 0
+                        available = 0
                     end
                 end
-                steerAway(cachedMonsters, clearance)
-                steerAway(cachedHazards, math.min(clearance, 24))
-                local steerLength = math.sqrt(steerX * steerX + steerZ * steerZ)
-                if steerLength > 0.001 then
-                    directionX = steerX / steerLength
-                    directionZ = steerZ / steerLength
+
+                local dt = RunService.Heartbeat:Wait()
+                if sequence ~= currentSequence then
+                    return false
                 end
+                if type(dt) ~= "number" or dt <= 0 then
+                    dt = 0.03
+                end
+                dt = math.min(dt, 0.1)
+
+                local step = math.min(distance, math.max(speed * dt, 1.5), MAX_STEP)
+                local yStep = 0
+                if math.abs(delta.Y) > 0.05 then
+                    yStep = math.clamp(delta.Y / distance * step, -step * 0.5, step * 0.5)
+                end
+                local horizontalStep = math.sqrt(math.max(0, step * step - yStep * yStep))
+                if available then
+                    horizontalStep = math.min(horizontalStep, math.max(0, available - 1.0))
+                end
+
+                if horizontalStep >= 0.15 or math.abs(yStep) >= 0.15 then
+                    local currentCFrame = root.CFrame
+                    local rotation = currentCFrame - currentCFrame.Position
+                    root.CFrame = CFrame.new(
+                        current.X + moveX * horizontalStep,
+                        current.Y + yStep,
+                        current.Z + moveZ * horizontalStep
+                    ) * rotation
+                end
+                KillVelocity()
             end
 
-            local dt = RunService.Heartbeat:Wait()
             if sequence ~= currentSequence then
                 return false
             end
-            if type(dt) ~= "number" or dt <= 0 then
-                dt = 0.03
-            end
-            dt = math.min(dt, 0.1)
 
-            local step = math.min(distance, math.max(speed * dt, 1.5), MAX_STEP)
-            local currentCFrame = root.CFrame
-            local rotation = currentCFrame - currentCFrame.Position
-            root.CFrame = CFrame.new(
-                current.X + directionX * step,
-                current.Y + directionY * step,
-                current.Z + directionZ * step
-            ) * rotation
-            KillVelocity()
+            local now = os.clock()
+            if (root.Position - lastProgressPosition).Magnitude >= 3 then
+                lastProgressAt = now
+                lastProgressPosition = root.Position
+            end
+
+            -- A moving monster can invalidate the static route. Rebuild once
+            -- progress stalls instead of pushing into the same corner.
+            if now - lastProgressAt > 2.5 and now - lastRepathAt > 1.5 then
+                waypoints = Nav.BuildPath(root.Position, targetPosition, { Hover = hover })
+                waypointIndex = 1
+                lastProgressAt = now
+                lastProgressPosition = root.Position
+                lastRepathAt = now
+            end
         end
 
         return false
@@ -779,7 +1447,7 @@ local function TeleportTo(object)
 
     Flight.To(targetCFrame.Position + Vector3.new(0, 3, 0), {
         Speed = 90,
-        Clearance = 30,
+        Clearance = 18,
         AvoidThreats = true,
     })
 end
@@ -808,7 +1476,7 @@ local function TeleportToElevator()
 
     Flight.To(targetCFrame.Position + Vector3.new(0, 3.5, 0), {
         Speed = 90,
-        Clearance = 30,
+        Clearance = 18,
         AvoidThreats = true,
     })
 end
@@ -839,7 +1507,7 @@ local function TeleportToPlayer(targetName)
 
     Flight.To(target.CFrame.Position + Vector3.new(0, 3, 0), {
         Speed = 90,
-        Clearance = 30,
+        Clearance = 18,
         AvoidThreats = true,
     })
 end
@@ -1410,8 +2078,9 @@ local Safety = {
     DangerActive = false,
     Relocated = false,
     Hold = 2.5,
-    Height = 32,
+    Height = 12,
     Speed = 110,
+    TargetAt = 0,
 }
 
 local function FireProximityPrompt(prompt)
@@ -1453,18 +2122,18 @@ function Safety.GetAnchor(generator)
 end
 
 function Safety.IsCompromised(position)
-    return Threat.Nearby(position, 32, 0, 30)
+    return #Threat.GetAttackers(position, 42) > 0
         or Threat.Nearby(position, 0, 22, 16)
 end
 
--- One-time escape target. Generators are the only stable landmarks in every
--- room, so the farthest one from the current threats wins. This is only used
--- after a chase refuses to break, at most once per floor.
+-- One-time farm relocation target. Generators are the only stable landmarks
+-- in every room, so the safest one (fewest attackers, farthest from threats)
+-- wins. This is only used after a chase refuses to break, at most once per
+-- floor. Escape motion itself stays with Nav.FindEscapePoint.
 function Safety.FindTarget()
     local generators = getRoomFolder("Generators")
     local character = LocalPlayer.Character
     local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
-    local bestPosition = nil
     local bestGenerator = nil
     local bestScore = -math.huge
 
@@ -1474,46 +2143,18 @@ function Safety.FindTarget()
             if anchor then
                 local nearestMonster, _, nearestHazard = Threat.Distances(anchor.Position)
                 local threatDistance = math.min(nearestMonster, nearestHazard)
+                local attackers = Threat.GetAttackers(anchor.Position, 65)
                 local playerDistance = playerRoot and (playerRoot.Position - anchor.Position).Magnitude or 0
-                local score = threatDistance - math.min(playerDistance, 250) * 0.1
+                local score = threatDistance - #attackers * 40 - math.min(playerDistance, 250) * 0.1
                 if score > bestScore then
                     bestScore = score
                     bestGenerator = generator
-                    bestPosition = anchor.Position + Vector3.new(0, Safety.Height, 0)
                 end
             end
         end
     end
 
-    if bestPosition then
-        return bestPosition, bestGenerator
-    end
-
-    -- No generators: fly directly away from the nearest threat.
-    local characterPosition = playerRoot and playerRoot.Position or Vector3.new(0, 0, 0)
-    local nearestMonster, monsterPart, nearestHazard, hazardPart = Threat.Distances(characterPosition)
-    local threatPart = nil
-    if nearestMonster <= nearestHazard then
-        threatPart = monsterPart
-    else
-        threatPart = hazardPart
-    end
-    if playerRoot and threatPart then
-        local awayX = playerRoot.Position.X - threatPart.Position.X
-        local awayZ = playerRoot.Position.Z - threatPart.Position.Z
-        local awayLength = math.sqrt(awayX * awayX + awayZ * awayZ)
-        if awayLength < 0.001 then
-            awayX, awayZ = 1, 0
-            awayLength = 1
-        end
-        return playerRoot.Position + Vector3.new(
-            (awayX / awayLength) * 55,
-            Safety.Height,
-            (awayZ / awayLength) * 55
-        ), nil
-    end
-
-    return nil, nil
+    return nil, bestGenerator
 end
 
 function Safety.Reset()
@@ -1525,6 +2166,7 @@ function Safety.Reset()
     Safety.Relocated = false
     Safety.Until = 0
     Safety.StartedAt = 0
+    Safety.TargetAt = 0
     lockedGen = nil
     isInteracting = false
     Flight.Cancel()
@@ -1558,30 +2200,15 @@ RunService.Heartbeat:Connect(function()
         end
 
         local playerPosition = root.Position
-        -- Hazards are ground-level, so hovering above them should count as
-        -- safe. Monsters get a taller vertical window because they can climb.
-        local dangerDetected = Threat.Nearby(playerPosition, 42, 0, 28)
-            or Threat.Nearby(playerPosition, 0, 30, 16)
+        local attackers = Threat.GetAttackers(playerPosition, 72)
+        local _, _, nearestHazard, hazardPart = Threat.Distances(playerPosition)
+        local hazardDanger = hazardPart
+            and nearestHazard < 22
+            and math.abs(hazardPart.Position.Y - playerPosition.Y) < 12
 
-        -- A monster actively chasing us stays dangerous even if it is a little
-        -- further away, but only within a sane radius. This prevents a stale
-        -- chase value from keeping safety mode on across the whole room.
-        if not dangerDetected and monsters then
-            for _, monster in pairs(monsters:GetChildren()) do
-                if not Threat.IsIgnored(monster.Name) then
-                    local chase = monster:FindFirstChild("ChasingValue")
-                    if chase and chase.Value
-                        and (chase.Value == LocalPlayer or string.lower(tostring(chase.Value)) == string.lower(LocalPlayer.Name))
-                    then
-                        local part = monster.PrimaryPart or monster:FindFirstChildWhichIsA("BasePart")
-                        if part and (part.Position - playerPosition).Magnitude < 90 then
-                            dangerDetected = true
-                            break
-                        end
-                    end
-                end
-            end
-        end
+        -- Monsters only count while they can see us or are already chasing.
+        -- Proximity alone does not: a wall is real cover.
+        local dangerDetected = #attackers > 0 or hazardDanger
 
         if dangerDetected then
             Safety.Locked = true
@@ -1590,66 +2217,115 @@ RunService.Heartbeat:Connect(function()
             if not Safety.DangerActive then
                 Safety.DangerActive = true
                 Safety.StartedAt = now
+                Safety.Target = nil
+                Safety.TargetAt = 0
                 Flight.Cancel()
                 StopInteraction()
                 isInteracting = false
             end
 
-            -- Start by hovering directly above the current farm spot. Moving
-            -- sideways at the first sign of danger is what created the old
-            -- generator-to-generator bounce.
-            if not Safety.Target then
-                local anchor = nil
-                if lockedGen and lockedGen.Parent then
-                    local generators = getRoomFolder("Generators")
-                    if generators and lockedGen:IsDescendantOf(generators) then
-                        anchor = Safety.GetAnchor(lockedGen)
-                    end
+            if not Safety.TargetGen and lockedGen and lockedGen.Parent then
+                local generators = getRoomFolder("Generators")
+                if generators and lockedGen:IsDescendantOf(generators) then
+                    Safety.TargetGen = lockedGen
                 end
-                if not anchor then
-                    -- Stale or unusable farm target: hover where we are
-                    -- instead of flying to another floor's coordinates.
-                    lockedGen = nil
-                end
-                local base = anchor and anchor.Position or playerPosition
-                Safety.Target = base + Vector3.new(0, Safety.Height, 0)
-                Safety.TargetGen = anchor and lockedGen or nil
+            end
+            if not Safety.Room then
                 Safety.Room = room
-                Flight.Cancel()
             end
 
-            -- If the chase still has not broken after a few seconds, relocate
-            -- once per floor to the safest generator. One deliberate escape is
-            -- fine; re-picking a target every second is what caused the loop.
+            -- Run opposite the chasing/visible monsters. When several are on
+            -- us, their weighted away-vectors combine into one escape heading.
+            local nearestAttacker = math.huge
+            for _, entry in ipairs(attackers) do
+                if entry.Distance < nearestAttacker then
+                    nearestAttacker = entry.Distance
+                end
+            end
+
+            local reached = Safety.Target
+                and (playerPosition - Safety.Target).Magnitude <= 10
+            local targetAge = now - (Safety.TargetAt or 0)
+
+            if not Safety.Target or reached
+                or (targetAge >= 1.25 and nearestAttacker < 32)
+            then
+                local fleeAttackers = attackers
+                if #fleeAttackers == 0 and hazardPart then
+                    fleeAttackers = { { Part = hazardPart } }
+                end
+
+                local escape = Nav.FindEscapePoint(
+                    playerPosition,
+                    fleeAttackers,
+                    Safety.Height
+                )
+                if escape and (
+                    not Safety.Target
+                    or reached
+                    or (escape - Safety.Target).Magnitude > 12
+                ) then
+                    Safety.Target = escape
+                    Safety.TargetAt = now
+                    Flight.Cancel()
+                elseif not Safety.Target then
+                    local awayX, awayZ = Threat.GetFleeVector(
+                        playerPosition,
+                        fleeAttackers
+                    )
+                    local awayDirection = Vector3.new(awayX, 0, awayZ)
+                    local available = Nav.Probe(
+                        playerPosition,
+                        awayDirection,
+                        40,
+                        2.4
+                    )
+                    local travel = math.min(40, math.max(0, available - 5))
+                    if travel >= 6 then
+                        Safety.Target = playerPosition + Vector3.new(
+                            awayX * travel,
+                            Safety.Height,
+                            awayZ * travel
+                        )
+                    else
+                        -- Boxed in: gain height instead of aiming through a
+                        -- wall at a point outside the room.
+                        Safety.Target = playerPosition
+                            + Vector3.new(0, Safety.Height, 0)
+                    end
+                    Safety.TargetAt = now
+                    Flight.Cancel()
+                else
+                    -- Throttle re-scoring when the new point barely moved.
+                    Safety.TargetAt = now
+                end
+            end
+
+            -- One deliberate farm relocation per floor after a chase refuses
+            -- to break. Movement stays a run-away point, not a generator hop.
             if not Safety.Relocated and now - Safety.StartedAt >= 8 then
                 Safety.Relocated = true
-                local newTarget, newGen = Safety.FindTarget()
-                if newTarget and newGen ~= Safety.TargetGen
-                    and Safety.Target
-                    and (newTarget - Safety.Target).Magnitude > 30
-                then
-                    Safety.Target = newTarget
+                local _, newGen = Safety.FindTarget()
+                if newGen and newGen ~= Safety.TargetGen then
                     Safety.TargetGen = newGen
-                    Safety.Room = room
-                    Flight.Cancel()
                 end
             end
         else
             Safety.DangerActive = false
             if Safety.Locked and now >= Safety.Until then
+                local currentSafe = not Safety.IsCompromised(playerPosition)
                 local resumeGen = Safety.TargetGen
                 local resumeAnchor = resumeGen and Safety.GetAnchor(resumeGen)
                 local resumeSafe = not resumeAnchor or isAreaSafe(resumeAnchor.Position)
-                local hoverClear = not Safety.Target or not Safety.IsCompromised(Safety.Target)
-                local arrived = not Safety.Target or (root.Position - Safety.Target).Magnitude <= 10
 
-                -- Stay in the air until the hover point and the generator we
-                -- are about to resume at are both clear of threats.
-                if arrived and hoverClear and resumeSafe then
+                -- Once cover breaks line of sight we can stop running without
+                -- waiting to reach the old escape point.
+                if currentSafe and resumeSafe then
                     Safety.Locked = false
                     Flight.Cancel()
 
                     Safety.Target = nil
+                    Safety.TargetAt = 0
                     Safety.TargetGen = nil
                     -- Keep Safety.Room for floor-change detection; it is
                     -- cleared by Safety.Reset or the next floor transition.
@@ -1702,7 +2378,7 @@ local function AutofarmStep()
         if Safety.Target then
             Flight.To(Safety.Target, {
                 Speed = Safety.Speed,
-                Clearance = 36,
+                Clearance = 18,
                 ArriveDistance = 4,
                 Timeout = 15,
             })
@@ -1749,7 +2425,7 @@ local function AutofarmStep()
                 isInteracting = false
                 local arrived = Flight.To(point.Position, {
                     Speed = Flight.FarmSpeed,
-                    Clearance = 32,
+                    Clearance = 18,
                     ArriveDistance = 4,
                     Timeout = 15,
                 })
@@ -1798,7 +2474,7 @@ local function AutofarmStep()
                 if position and (root.Position - position).Magnitude > 5 then
                     local arrived = Flight.To(position, {
                         Speed = Flight.FarmSpeed,
-                        Clearance = 30,
+                        Clearance = 18,
                         ArriveDistance = 4,
                         Timeout = 15,
                     })
@@ -1841,7 +2517,7 @@ local function AutofarmStep()
                 if (root.Position - destination).Magnitude > 3 then
                     Flight.To(destination, {
                         Speed = Flight.FarmSpeed,
-                        Clearance = 30,
+                        Clearance = 18,
                         ArriveDistance = 3,
                         Timeout = 15,
                     })
