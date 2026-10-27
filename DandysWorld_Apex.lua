@@ -2066,8 +2066,9 @@ local levelReady = false
 local lastAutofarmTick = 0
 local autofarmWarned = false
 
--- Safety movement is sticky: one destination, a hold window, and no instant
--- snap-back when the threat briefly drops out of range.
+-- Safety movement is sticky between refreshes: it holds one escape point,
+-- then re-scores when the nearest attacker closes in. The hold window stops
+-- the old instant snap-back when a threat briefly drops out of range.
 local Safety = {
     Locked = false,
     Target = nil,
