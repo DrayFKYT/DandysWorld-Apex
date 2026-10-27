@@ -1,4 +1,4 @@
-# Dandy's World — APEX
+# Dandys World — APEX
 
 Dandy's World script with the **APEX_SYS V3.7 PLUS** terminal interface.
 

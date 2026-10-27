@@ -1681,7 +1681,7 @@ end)
 
 -- // UI
 local MyWindow = ApexLibrary.new({
-    Title = "SYSTEM_CONTROL // ENGINE",
+    Title = "Dandys World",
     BrandText = "APEX_SYS // RH",
     StatusText = "READY",
     AccentColor = Color3.fromRGB(255, 85, 0),
