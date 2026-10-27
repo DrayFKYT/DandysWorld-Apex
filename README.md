@@ -7,7 +7,7 @@ The UI uses the six-tab layout: `MAIN`, `VISUALS`, `TELEPORTS`, `AUTOMATION`, `P
 ## Load
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/DrayFKYT/DandysWorld-Apex/refs/heads/main/DandysWorld_Apex.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/DrayFKYT/DandysWorld-Apex/main/DandysWorld_Apex.lua"))()
 ```
 
 ## Library
