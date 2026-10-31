@@ -2,7 +2,7 @@
 
 Dandy's World script with the **APEX_SYS V3.7 PLUS** terminal interface.
 
-The UI uses the six-tab layout: `MAIN`, `VISUALS`, `TELEPORTS`, `AUTOMATION`, `PLAYERS`, and `CONFIG`. The window title is `Dandys World // Menu`. On PC the window renders at 120% when the viewport has room so the terminal text is easier to read; touch devices keep their fit scale. If a script adds more than six tabs, the tab bar scrolls horizontally with `<` / `>` arrows; selecting a tab scrolls it into view. The script downloads the APEX library from its public repo on startup, with a local file fallback for development.
+The UI uses the six-tab layout: `MAIN`, `VISUALS`, `TELEPORTS`, `AUTOMATION`, `PLAYERS`, and `CONFIG`. The window title is `Dandys World // Menu`. On PC the window stays at its native size, but the smallest terminal labels use larger native font sizes and drop the tiny text stroke for sharper text; touch devices keep their original text sizes and fit scale. If a script adds more than six tabs, the tab bar scrolls horizontally with `<` / `>` arrows; selecting a tab scrolls it into view. The script downloads the APEX library from its public repo on startup, with a local file fallback for development.
 
 ## Load
 
