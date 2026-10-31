@@ -18,6 +18,14 @@ The interface is provided by [Apex-Gui-library](https://github.com/DrayFKYT/Apex
 https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua
 ```
 
+## Documentation
+
+Full API reference for tabs, buttons, toggles, inputs, color pickers, lists, keybinds, themes, and cleanup:
+
+```text
+https://github.com/DrayFKYT/Apex-Gui-library#readme
+```
+
 ## Movement
 
 All teleports use the same incremental CFrame flight: capped steps and orientation preserved. Static walls are routed with `PathfindingService`; the local fallback follows wall faces with three-ray probes instead of crossing them. Monsters and hazards are steered around with a clearance radius, so passing near them is allowed but touching is not.
@@ -26,6 +34,6 @@ Autofarm safety runs away from the current attacker (or the combined direction o
 
 ## Notes
 
-- Default toggle key: `RightControl`
+- DEFAULT hide key: `RightControl`
 - Settings are saved as `ApexLibrary_Config.json`
 - `CONFIG` also contains the fixed `KILL SCRIPT & CLEANUP` button

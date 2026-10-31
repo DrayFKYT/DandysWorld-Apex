@@ -2747,7 +2747,7 @@ local TabDefinitions = {
         Build = function(tab)
             tab:CreateReadMeCard(
                 "WELCOME // DANDYS WORLD",
-                "Press RightControl on PC or tap the claw button on mobile to toggle the menu. ESP colors are fully editable in VISUALS. TELEPORTS tracks live room objects, AUTOMATION handles farming and skill checks, and PLAYERS shows trinkets and inventory.",
+                "DEFAULT is RightControl on PC; tap the claw button on mobile to toggle. ESP colors are editable in VISUALS. TELEPORTS tracks live objects, AUTOMATION handles farming and skill checks, PLAYERS shows trinkets and inventory.",
                 96
             )
             tab:CreateSectionLabel("SESSION INFO")
@@ -2756,7 +2756,7 @@ local TabDefinitions = {
             tab:CreateInfoCard("UI_ENGINE", ApexLibrary.Version or "APEX_SYS")
             tab:CreateReadMeCard(
                 "QUICK NOTES",
-                "ESP highlights refresh once per second. Color changes apply on the next refresh. Autofarm is not saved between sessions for safety.",
+                "ESP highlights refresh once per second. Color changes apply on the next refresh.",
                 80
             )
         end
