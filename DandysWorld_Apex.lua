@@ -13,14 +13,14 @@
         and loads it automatically. Local copies are only a fallback.
 
     Library URL:
-        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=7
+        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=8
 ]================================================================]--
 
 -- // Apex Library Loader
 -- The version query bypasses executor HTTP caches that still hold the old
 -- library. LayoutRevision below rejects any stale copy that slips through.
-local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=7"
-local MIN_LAYOUT_REVISION = 7
+local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=8"
+local MIN_LAYOUT_REVISION = 8
 
 local function IsPlusLibrary(library)
     return type(library) == "table"
@@ -824,6 +824,20 @@ do
         return clear
     end
 
+    -- Distance from a point to the nearest ceiling above it. Flight uses this
+    -- so raised teleport paths stop below roofs instead of clipping through.
+    function Nav.GetCeilingClearance(position, maxDistance)
+        local limit = maxDistance or 30
+        if type(workspace.Raycast) ~= "function" then
+            return limit
+        end
+        local hit = raycast(position, Vector3.new(0, limit, 0), Nav.GetRayParams(false))
+        if hit and hit.Distance then
+            return math.clamp(hit.Distance, 0, limit)
+        end
+        return limit
+    end
+
     -- Pick the closest clear heading to the desired direction. When a wall
     -- blocks the way, follow the wall's tangent instead of aiming at the
     -- goal. Preferred keeps the same side of the wall while rounding a
@@ -1142,11 +1156,11 @@ end
 local Flight = {}
 do
     local MAX_STEP = 6
-    local DEFAULT_SPEED = 85
+    local DEFAULT_SPEED = 55
     local TIMEOUT = 25
     local sequence = 0
 
-    Flight.FarmSpeed = 65
+    Flight.FarmSpeed = 45
 
     function Flight.Cancel()
         sequence = sequence + 1
@@ -1220,6 +1234,26 @@ do
         return x, z
     end
 
+    -- Keep upward movement below the ceiling. The character's head is about
+    -- three studs above HumanoidRootPart, so probe from that point upward.
+    local function clampCeilingRise(current, yStep)
+        if yStep <= 0 then
+            return yStep
+        end
+        local clearance = Nav.GetCeilingClearance(
+            current + Vector3.new(0, 3, 0),
+            yStep + 0.5
+        )
+        if clearance < yStep + 0.5 then
+            return math.max(0, clearance - 0.25)
+        end
+        return yStep
+    end
+
+    local function setRootCFrame(root, position, rotation)
+        root.CFrame = CFrame.new(position.X, position.Y, position.Z) * rotation
+    end
+
     function Flight.To(targetPosition, options)
         if not targetPosition then
             return false
@@ -1240,7 +1274,8 @@ do
         local timeout = options.Timeout or TIMEOUT
         local avoidThreats = options.AvoidThreats ~= false
         local clearance = options.Clearance or 18
-        local hover = options.Hover or 3
+        local hover = options.Hover or 4
+        local snapOnArrive = options.SnapOnArrive == true
         local startedAt = os.clock()
         local lastThreatScan = 0
         local cachedMonsters = {}
@@ -1269,6 +1304,10 @@ do
             local current = root.Position
             local targetDelta = targetPosition - current
             if targetDelta.Magnitude <= arriveDistance then
+                if snapOnArrive then
+                    local rotation = root.CFrame - root.CFrame.Position
+                    setRootCFrame(root, targetPosition, rotation)
+                end
                 KillVelocity()
                 return true
             end
@@ -1292,6 +1331,10 @@ do
                 if waypoint then
                     waypointIndex = waypointIndex + 1
                 else
+                    if snapOnArrive then
+                        local rotation = root.CFrame - root.CFrame.Position
+                        setRootCFrame(root, targetPosition, rotation)
+                    end
                     KillVelocity()
                     return true
                 end
@@ -1370,7 +1413,7 @@ do
                 end
                 dt = math.min(dt, 0.1)
 
-                local step = math.min(distance, math.max(speed * dt, 1.5), MAX_STEP)
+                local step = math.min(distance, math.max(speed * dt, 0.25), MAX_STEP)
                 local yStep = 0
                 if math.abs(delta.Y) > 0.05 then
                     yStep = math.clamp(delta.Y / distance * step, -step * 0.5, step * 0.5)
@@ -1380,14 +1423,15 @@ do
                     horizontalStep = math.min(horizontalStep, math.max(0, available - 1.0))
                 end
 
+                local nextY = current.Y + clampCeilingRise(current, yStep)
                 if horizontalStep >= 0.15 or math.abs(yStep) >= 0.15 then
                     local currentCFrame = root.CFrame
                     local rotation = currentCFrame - currentCFrame.Position
-                    root.CFrame = CFrame.new(
+                    setRootCFrame(root, Vector3.new(
                         current.X + moveX * horizontalStep,
-                        current.Y + yStep,
+                        nextY,
                         current.Z + moveZ * horizontalStep
-                    ) * rotation
+                    ), rotation)
                 end
                 KillVelocity()
             end
@@ -1415,6 +1459,20 @@ do
 
         return false
     end
+end
+
+local TELEPORT_SPEED = 55
+local TELEPORT_HEIGHT = 5
+
+-- Raise teleport destinations enough to clear the floor and small props,
+-- then shorten that height when a ceiling is close overhead.
+local function TeleportTarget(basePosition)
+    local clearance = Nav.GetCeilingClearance(
+        basePosition + Vector3.new(0, 1, 0),
+        TELEPORT_HEIGHT + 10
+    )
+    local height = math.clamp(clearance - 4, 1.5, TELEPORT_HEIGHT)
+    return basePosition + Vector3.new(0, height, 0), height
 end
 
 local function TeleportTo(object)
@@ -1445,10 +1503,13 @@ local function TeleportTo(object)
         return
     end
 
-    Flight.To(targetCFrame.Position + Vector3.new(0, 3, 0), {
-        Speed = 90,
+    local targetPosition, hover = TeleportTarget(targetCFrame.Position)
+    Flight.To(targetPosition, {
+        Speed = TELEPORT_SPEED,
         Clearance = 18,
         AvoidThreats = true,
+        Hover = hover,
+        SnapOnArrive = true,
     })
 end
 
@@ -1474,10 +1535,13 @@ local function TeleportToElevator()
         return
     end
 
-    Flight.To(targetCFrame.Position + Vector3.new(0, 3.5, 0), {
-        Speed = 90,
+    local targetPosition, hover = TeleportTarget(targetCFrame.Position)
+    Flight.To(targetPosition, {
+        Speed = TELEPORT_SPEED,
         Clearance = 18,
         AvoidThreats = true,
+        Hover = hover,
+        SnapOnArrive = true,
     })
 end
 
@@ -1505,10 +1569,13 @@ local function TeleportToPlayer(targetName)
         return
     end
 
-    Flight.To(target.CFrame.Position + Vector3.new(0, 3, 0), {
-        Speed = 90,
+    local targetPosition, hover = TeleportTarget(target.CFrame.Position)
+    Flight.To(targetPosition, {
+        Speed = TELEPORT_SPEED,
         Clearance = 18,
         AvoidThreats = true,
+        Hover = hover,
+        SnapOnArrive = true,
     })
 end
 
@@ -2080,7 +2147,7 @@ local Safety = {
     Relocated = false,
     Hold = 2.5,
     Height = 12,
-    Speed = 110,
+    Speed = 70,
     TargetAt = 0,
 }
 
