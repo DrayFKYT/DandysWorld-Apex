@@ -39,19 +39,21 @@ The same tab has `RAGDOLL` and `UNRAGDOLL` action rows. Ragdoll tumbles the rig 
 
 The instant-menu drop timing is fixed at 1 second and 1,111,111 studs/second. `DROP_DURATION` and `DROP_SPEED` are no longer editable controls and are not read from the config file.
 
+Exploit Fly speed accepts values from `1` to `100000`.
+
 While `INFINITE_OXYGEN` is enabled the `BREATH` HUD bar is hidden; while `INFINITE_MOISTURE` is enabled the `MOISTURE` HUD bar is hidden. Both bars return to their normal state when the toggles are turned off or the script is cleaned up.
 
-The `CONFIG` tab's `OPEN / CLOSE MENU` row is a mandatory keybind: clicking the key chip rebinds it, but the binding cannot be cleared and the row never shows an `X`.
+The `CONFIG` tab's `OPEN / CLOSE MENU` row is a keybind-only row: clicking the key chip rebinds it, the binding cannot be cleared, and it shows neither an `X` nor a toggle button.
 
 ## Library
 
 The interface is provided by [Apex-Gui-library](https://github.com/DrayFKYT/Apex-Gui-library):
 
 ```text
-https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua
+https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/main/ApexLibraryPlus.lua
 ```
 
-Both scripts download revision 10 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 10 adds `Tab:CreateKeybindButton`: an action card with a programmable key chip and an optional clear `X`.
+Both scripts download revision 11 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 11 adds `Tab:CreateKeybindButton` rows with optional action buttons and clear buttons; `ShowAction = false` leaves a keybind-only row.
 
 ## Documentation
 

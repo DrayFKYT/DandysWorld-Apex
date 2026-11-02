@@ -27,14 +27,14 @@
         and loads it automatically. Local copies are only a fallback.
 
     Library URL:
-        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=10
+        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/main/ApexLibraryPlus.lua?v=11
 ]================================================================]--
 
 -- // Apex Library Loader
 -- The version query bypasses executor HTTP caches that still hold an old
 -- library. MIN_LAYOUT_REVISION rejects stale copies that slip through.
-local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=10"
-local MIN_LAYOUT_REVISION = 10
+local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/main/ApexLibraryPlus.lua?v=11"
+local MIN_LAYOUT_REVISION = 11
 
 local function IsPlusLibrary(library)
     return type(library) == "table"
@@ -246,6 +246,8 @@ local Speeds = {
     AilmentPulse = 8
 }
 
+local EXPLOIT_FLY_MAX = 100000
+
 -- // The instant-menu drop is intentionally fixed. These values are no longer
 -- exposed as controls or loaded from the config file.
 local DROP_DURATION = 1
@@ -373,7 +375,7 @@ local function LoadScriptConfig()
         Speeds.Walk = ClampNumber(speeds.Walk, 1, 5000, Speeds.Walk)
         Speeds.Sprint = ClampNumber(speeds.Sprint, 1, 5000, Speeds.Sprint)
         Speeds.Fly = ClampNumber(speeds.Fly, 1, 5000, Speeds.Fly)
-        Speeds.ExploitFly = ClampNumber(speeds.ExploitFly, 1, 2000, Speeds.ExploitFly)
+        Speeds.ExploitFly = ClampNumber(speeds.ExploitFly, 1, EXPLOIT_FLY_MAX, Speeds.ExploitFly)
         Speeds.ScentPulse = ClampNumber(speeds.ScentPulse, 1, 60, Speeds.ScentPulse)
         Speeds.AilmentPulse = ClampNumber(speeds.AilmentPulse, 1, 60, Speeds.AilmentPulse)
     end
@@ -2467,7 +2469,7 @@ local function BuildUI()
                 SaveScriptConfig()
             end,
             function(value)
-                Speeds.ExploitFly = ClampNumber(value, 1, 2000, Speeds.ExploitFly)
+                Speeds.ExploitFly = ClampNumber(value, 1, EXPLOIT_FLY_MAX, Speeds.ExploitFly)
                 if exploitFlyControl then
                     exploitFlyControl:SetValue(Speeds.ExploitFly)
                 end
@@ -3093,10 +3095,7 @@ local function BuildUI()
                     Key = MyWindow.CurrentHideKey,
                     Required = true,
                     TriggerOnKey = false,
-                    ActionText = "TOGGLE",
-                    OnActivated = function()
-                        MyWindow:SetVisible(not MyWindow.IsUIVisible)
-                    end,
+                    ShowAction = false,
                     OnKeyChanged = function(key)
                         if key then
                             MyWindow.CurrentHideKey = key
