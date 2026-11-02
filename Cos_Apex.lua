@@ -1741,20 +1741,114 @@ local function RestoreOriginalAnimations()
 end
 
 -- // Ragdoll -----------------------------------------------------------
--- COS rigs do not use a Humanoid, so this is a client-side tumble: the root
--- is rotated each frame, BodyGyro follows it, and BodyVelocity adds a slow
--- directional roll with occasional small hops. UNRAGDOLL rights the rig.
+-- Real client-side ragdoll. COS rigs have no Humanoid, so the major skeleton
+-- Motor6Ds are temporarily replaced with free BallSocketConstraints, the
+-- movement movers are neutralised, and gravity does the rest. UNRAGDOLL
+-- re-enables every motor, restores the part properties, and stands the rig up.
+local RAGDOLL_MIN_PART_VOLUME = 200
+
 local RagdollState = {
     Active = false,
     Character = nil,
+    Model = nil,
     Root = nil,
     Connection = nil,
-    Spin = Vector3.new(0, 0, 0),
-    Direction = Vector3.new(0, 0, 0),
-    NextDirection = 0,
-    NextHop = 0,
-    HopUntil = 0
+    Joints = {},
+    SavedParts = {},
+    SavedMovers = nil,
+    SavedRootAnchored = false
 }
+
+local function RagdollPartVolume(part)
+    local size = part.Size
+    return size.X * size.Y * size.Z
+end
+
+-- COS uses extra "S" shell meshes (UpperBodyS6, T4S4, ...) layered over the
+-- main skeleton. They stay welded to their base part so the creature keeps
+-- its shape while the base joints go limp.
+local function IsRagdollShellPart(part, model)
+    local base = string.match(part.Name, "^(.-)S%d*$")
+    if not base or base == "" then
+        return false
+    end
+    return model:FindFirstChild(base, true) ~= nil
+end
+
+local function CollectRagdollJoints(model)
+    local joints = {}
+    local seen = {}
+    local motorCounts = {}
+    local motors = {}
+    for _, motor in ipairs(model:GetDescendants()) do
+        if motor:IsA("Motor6D") and motor.Part0 and motor.Part1 then
+            motorCounts[motor.Part1] = (motorCounts[motor.Part1] or 0) + 1
+            motors[#motors + 1] = motor
+        end
+    end
+    for _, motor in ipairs(motors) do
+        local part0 = motor.Part0
+        local part1 = motor.Part1
+        if part0:IsDescendantOf(model)
+            and part1:IsDescendantOf(model)
+            and motorCounts[part1] == 1
+            and part0.Name ~= "Hitbox"
+            and part1.Name ~= "Hitbox"
+            and motor.Name ~= "ChatBubbleMotor"
+            and RagdollPartVolume(part1) >= RAGDOLL_MIN_PART_VOLUME
+            and not IsRagdollShellPart(part1, model)
+            and not seen[part1]
+        then
+            seen[part1] = true
+            joints[#joints + 1] = motor
+        end
+    end
+    return joints
+end
+
+local function NeutralizeRagdollMovers(character)
+    if character.BodyGyro then
+        pcall(function()
+            character.BodyGyro.MaxTorque = Vector3.new(0, 0, 0)
+        end)
+    end
+    if character.BodyVelocity then
+        pcall(function()
+            character.BodyVelocity.MaxForce = Vector3.new(0, 0, 0)
+        end)
+    end
+    if character.BodyForce then
+        pcall(function()
+            character.BodyForce.Force = Vector3.new(0, 0, 0)
+        end)
+    end
+    if character.BodyPosition then
+        pcall(function()
+            character.BodyPosition.MaxForce = Vector3.new(0, 0, 0)
+        end)
+    end
+    if character.LinearVelocity then
+        pcall(function()
+            character.LinearVelocity.Enabled = false
+        end)
+    end
+end
+
+local function GetRagdollGroundY(root, model)
+    local ok, filterType = pcall(function()
+        return Enum.RaycastFilterType.Exclude
+    end)
+    if not ok then
+        filterType = Enum.RaycastFilterType.Blacklist
+    end
+    local params = RaycastParams.new()
+    params.FilterType = filterType
+    params.FilterDescendantsInstances = { model }
+    params.IgnoreWater = true
+    local origin = root.Position + Vector3.new(0, root.Size.Y, 0)
+    local hit = Workspace:Raycast(origin, Vector3.new(0, -600, 0), params)
+    return hit and hit.Position.Y or nil
+end
 
 local function StopRagdoll(silent)
     if not RagdollState.Active then
@@ -1771,18 +1865,84 @@ local function StopRagdoll(silent)
 
     local character = RagdollState.Character
     local root = RagdollState.Root
+
+    -- Restore the skeleton first so nothing is left simulated.
+    for _, motor in ipairs(RagdollState.Joints) do
+        pcall(function()
+            if motor.Parent then
+                motor.Enabled = true
+            end
+        end)
+    end
+    for _, item in ipairs(RagdollState.Attachments) do
+        pcall(function()
+            item:Destroy()
+        end)
+    end
+    for _, item in ipairs(RagdollState.Constraints) do
+        pcall(function()
+            item:Destroy()
+        end)
+    end
+    RagdollState.Joints = {}
+    RagdollState.Attachments = {}
+    RagdollState.Constraints = {}
+
+    for part, saved in pairs(RagdollState.SavedParts) do
+        pcall(function()
+            if part.Parent then
+                part.Massless = saved.Massless
+            end
+        end)
+    end
+    RagdollState.SavedParts = {}
+
+    local movers = RagdollState.SavedMovers
+    if movers and character then
+        if character.BodyGyro then
+            pcall(function()
+                character.BodyGyro.MaxTorque = movers.Gyro
+            end)
+        end
+        if character.BodyVelocity then
+            pcall(function()
+                character.BodyVelocity.MaxForce = movers.Velocity
+            end)
+        end
+        if character.BodyForce then
+            pcall(function()
+                character.BodyForce.Force = movers.Force
+            end)
+        end
+        if character.BodyPosition then
+            pcall(function()
+                character.BodyPosition.MaxForce = movers.Position
+            end)
+        end
+        if character.LinearVelocity then
+            pcall(function()
+                character.LinearVelocity.Enabled = movers.LinearEnabled
+            end)
+        end
+    end
+    RagdollState.SavedMovers = nil
+
     if root and root.Parent then
         local yaw = 0
-        local ok, orientation = pcall(function()
+        pcall(function()
             local _, currentYaw = root.CFrame:ToOrientation()
-            return currentYaw
+            yaw = currentYaw
         end)
-        if ok and orientation then
-            yaw = orientation
+        local x, y, z = root.Position.X, root.Position.Y, root.Position.Z
+        local groundY = GetRagdollGroundY(root, root.Parent)
+        if groundY then
+            y = groundY + root.Size.Y * 0.5 + 1
         end
-        local upright = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+        local upright = CFrame.new(Vector3.new(x, y, z)) * CFrame.Angles(0, yaw, 0)
         pcall(function()
             root.CFrame = upright
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end)
         if character and character.BodyGyro then
             pcall(function()
@@ -1794,14 +1954,15 @@ local function StopRagdoll(silent)
                 character.BodyVelocity.Velocity = Vector3.new(0, 0, 0)
             end)
         end
+        pcall(function()
+            root.Anchored = RagdollState.SavedRootAnchored
+        end)
     end
 
     RagdollState.Character = nil
+    RagdollState.Model = nil
     RagdollState.Root = nil
-    RagdollState.Direction = Vector3.new(0, 0, 0)
-    RagdollState.NextDirection = 0
-    RagdollState.NextHop = 0
-    RagdollState.HopUntil = 0
+    RagdollState.SavedRootAnchored = false
 
     if not silent and SafeSetStatus then
         SafeSetStatus("RAGDOLL_OFF")
@@ -1817,7 +1978,17 @@ local function StartRagdoll()
     end
 
     local character = GetCosCharacter()
-    if not character or not character.Root or not character.Root.Parent then
+    local root = character and character.Root
+    local model = root and root.Parent
+    if not character or not root or not root.Parent or not model then
+        if SafeSetStatus then
+            SafeSetStatus("RAGDOLL_NO_CREATURE")
+        end
+        return false
+    end
+
+    local joints = CollectRagdollJoints(model)
+    if #joints == 0 then
         if SafeSetStatus then
             SafeSetStatus("RAGDOLL_NO_CREATURE")
         end
@@ -1828,62 +1999,120 @@ local function StartRagdoll()
 
     RagdollState.Active = true
     RagdollState.Character = character
-    RagdollState.Root = character.Root
-    RagdollState.Spin = Vector3.new(
-        math.random(-45, 45) / 10,
-        math.random(-45, 45) / 10,
-        math.random(-45, 45) / 10
-    )
-    RagdollState.Direction = Vector3.new(0, 0, 0)
-    RagdollState.NextDirection = 0
-    RagdollState.NextHop = 0
-    RagdollState.HopUntil = 0
+    RagdollState.Model = model
+    RagdollState.Root = root
+    RagdollState.Joints = joints
+    RagdollState.SavedParts = {}
+    RagdollState.Attachments = {}
+    RagdollState.Constraints = {}
+    RagdollState.SavedRootAnchored = root.Anchored
+    RagdollState.SavedMovers = {
+        Gyro = character.BodyGyro and character.BodyGyro.MaxTorque or nil,
+        Velocity = character.BodyVelocity and character.BodyVelocity.MaxForce or nil,
+        Force = character.BodyForce and character.BodyForce.Force or nil,
+        Position = character.BodyPosition and character.BodyPosition.MaxForce or nil,
+        LinearEnabled = character.LinearVelocity and character.LinearVelocity.Enabled or nil
+    }
 
-    RagdollState.Connection = RunService.RenderStepped:Connect(function(deltaTime)
+    -- Give the major body parts weight so the ragdoll actually falls limp.
+    for _, motor in ipairs(joints) do
+        local part = motor.Part1
+        if part and part ~= root and not RagdollState.SavedParts[part] then
+            RagdollState.SavedParts[part] = { Massless = part.Massless }
+            pcall(function()
+                part.Massless = false
+            end)
+        end
+    end
+
+    -- Replace every selected weld joint with a free ball socket. Attachments
+    -- sit on the motor's current pivot so the pose does not pop.
+    for _, motor in ipairs(joints) do
+        local part0 = motor.Part0
+        local part1 = motor.Part1
+        if part0 and part1 and part0.Parent and part1.Parent then
+            local att0, att1, socket
+            local ok = pcall(function()
+                att0 = Instance.new("Attachment")
+                att0.Name = "ApexRagdollA0"
+                att0.Position = motor.C0.Position
+                att0.Parent = part0
+
+                att1 = Instance.new("Attachment")
+                att1.Name = "ApexRagdollA1"
+                att1.Position = motor.C1.Position
+                att1.Parent = part1
+
+                socket = Instance.new("BallSocketConstraint")
+                socket.Name = "ApexRagdollSocket"
+                socket.Attachment0 = att0
+                socket.Attachment1 = att1
+                socket.LimitsEnabled = false
+                socket.TwistLimitsEnabled = false
+                socket.Parent = model
+            end)
+            if ok and socket then
+                RagdollState.Attachments[#RagdollState.Attachments + 1] = att0
+                RagdollState.Attachments[#RagdollState.Attachments + 1] = att1
+                RagdollState.Constraints[#RagdollState.Constraints + 1] = socket
+                pcall(function()
+                    motor.Enabled = false
+                end)
+            else
+                pcall(function()
+                    if socket then
+                        socket:Destroy()
+                    end
+                    if att0 then
+                        att0:Destroy()
+                    end
+                    if att1 then
+                        att1:Destroy()
+                    end
+                end)
+            end
+        end
+    end
+
+    root.Anchored = false
+    NeutralizeRagdollMovers(character)
+
+    pcall(function()
+        local velocity = root.AssemblyLinearVelocity
+        local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
+        if horizontal.Magnitude > 80 then
+            velocity = Vector3.new(horizontal.Unit.X * 80, velocity.Y, horizontal.Unit.Z * 80)
+        end
+        local angle = math.random() * math.pi * 2
+        local push = 3 + math.random() * 3
+        root.AssemblyLinearVelocity = velocity + Vector3.new(math.cos(angle) * push, 2, math.sin(angle) * push)
+        root.AssemblyAngularVelocity = Vector3.new(
+            (math.random() - 0.5) * 4,
+            (math.random() - 0.5) * 4,
+            (math.random() - 0.5) * 4
+        )
+    end)
+
+    RagdollState.Connection = RunService.Heartbeat:Connect(function()
         if not SessionActive() then
             StopRagdoll(true)
             return
         end
 
-        local root = RagdollState.Root
         local rig = RagdollState.Character
-        if not root or not root.Parent or not rig then
+        local rigRoot = RagdollState.Root
+        if not rig or not rigRoot or not rigRoot.Parent then
             StopRagdoll(true)
             return
         end
 
-        local dt = math.clamp(deltaTime or 0.016, 0, 0.1)
-        local now = os.clock()
-
-        if now >= RagdollState.NextDirection then
-            local angle = math.random() * math.pi * 2
-            RagdollState.Direction = Vector3.new(math.cos(angle), 0, math.sin(angle))
-            RagdollState.NextDirection = now + (math.random(7, 14) / 10)
+        rigRoot.Anchored = false
+        for _, motor in ipairs(RagdollState.Joints) do
+            if motor.Enabled then
+                motor.Enabled = false
+            end
         end
-
-        if now >= RagdollState.NextHop then
-            RagdollState.HopUntil = now + 0.22
-            RagdollState.NextHop = now + math.random(2, 5)
-        end
-
-        local spin = RagdollState.Spin
-        root.CFrame = root.CFrame * CFrame.Angles(spin.X * dt, spin.Y * dt, spin.Z * dt)
-        if rig.BodyGyro then
-            pcall(function()
-                rig.BodyGyro.CFrame = root.CFrame
-            end)
-        end
-
-        local vertical = now < RagdollState.HopUntil and 18 or 0
-        if rig.BodyVelocity then
-            pcall(function()
-                rig.BodyVelocity.Velocity = Vector3.new(
-                    RagdollState.Direction.X * 11,
-                    vertical,
-                    RagdollState.Direction.Z * 11
-                )
-            end)
-        end
+        NeutralizeRagdollMovers(rig)
     end)
 
     if SafeSetStatus then
