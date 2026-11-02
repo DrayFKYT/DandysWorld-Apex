@@ -2040,15 +2040,18 @@ local function StartRagdoll()
         if part0 and part1 and part0.Parent and part1.Parent then
             local att0, att1, socket
             local ok = pcall(function()
+                -- Use the animated joint pivot, not the rest C0/C1 offsets, so
+                -- the transition into the ragdoll does not pop the current pose.
+                local pivot = (part0.CFrame * motor.C0 * motor.Transform).Position
                 att0 = Instance.new("Attachment")
                 att0.Name = "ApexRagdollA0"
-                att0.Position = motor.C0.Position
                 att0.Parent = part0
+                att0.WorldPosition = pivot
 
                 att1 = Instance.new("Attachment")
                 att1.Name = "ApexRagdollA1"
-                att1.Position = motor.C1.Position
                 att1.Parent = part1
+                att1.WorldPosition = pivot
 
                 socket = Instance.new("BallSocketConstraint")
                 socket.Name = "ApexRagdollSocket"
@@ -2057,14 +2060,13 @@ local function StartRagdoll()
                 socket.LimitsEnabled = false
                 socket.TwistLimitsEnabled = false
                 socket.Parent = model
+
+                motor.Enabled = false
             end)
             if ok and socket then
                 RagdollState.Attachments[#RagdollState.Attachments + 1] = att0
                 RagdollState.Attachments[#RagdollState.Attachments + 1] = att1
                 RagdollState.Constraints[#RagdollState.Constraints + 1] = socket
-                pcall(function()
-                    motor.Enabled = false
-                end)
             else
                 pcall(function()
                     if socket then
@@ -3481,7 +3483,7 @@ local function BuildUI()
         tab:CreateSectionLabel("RAGDOLL CONTROLS")
         tab:CreateKeybindButton(
             "RAGDOLL",
-            "Tumble and roll the current creature. The keybind is optional; clear it with X or click the action button.",
+            "Drop into a physical ragdoll and collapse the current creature. The keybind is optional; clear it with X or click the action button.",
             {
                 Key = KeybindToEnum(Keybinds.Ragdoll),
                 Required = false,
@@ -3497,7 +3499,7 @@ local function BuildUI()
         )
         tab:CreateKeybindButton(
             "UNRAGDOLL",
-            "Stop the tumble, right the creature, and return control to COS.",
+            "Restore the skeleton, stand the creature up, and return control to COS.",
             {
                 Key = KeybindToEnum(Keybinds.Unragdoll),
                 Required = false,
