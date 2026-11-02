@@ -3024,6 +3024,15 @@ local function BuildUI()
         RenderAnimationResults()
         UpdateAnimationStatus(true)
 
+        tab:CreateButton(
+            "RESTORE_ORIGINAL_ANIMATIONS",
+            "Stop the preview and return the current creature to its own animation set.",
+            function()
+                RestoreOriginalAnimations()
+                SafeSetStatus("ANIMATION_RESTORED")
+            end
+        )
+
         tab:CreateSectionLabel("RAGDOLL CONTROLS")
         tab:CreateKeybindButton(
             "RAGDOLL",
@@ -3056,15 +3065,6 @@ local function BuildUI()
                     SaveScriptConfig()
                 end
             }
-        )
-
-        tab:CreateButton(
-            "RESTORE_ORIGINAL_ANIMATIONS",
-            "Stop the preview and return the current creature to its own animation set.",
-            function()
-                RestoreOriginalAnimations()
-                SafeSetStatus("ANIMATION_RESTORED")
-            end
         )
 
         tab:CreateButton(
