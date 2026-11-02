@@ -1745,7 +1745,7 @@ end
 -- Motor6Ds are temporarily replaced with free BallSocketConstraints, the
 -- movement movers are neutralised, and gravity does the rest. UNRAGDOLL
 -- re-enables every motor, restores the part properties, and stands the rig up.
-local RAGDOLL_MIN_PART_VOLUME = 200
+local RAGDOLL_JOINT_VOLUME_RATIO = 0.05
 
 local RagdollState = {
     Active = false,
@@ -1781,12 +1781,24 @@ local function CollectRagdollJoints(model)
     local seen = {}
     local motorCounts = {}
     local motors = {}
+    local largestVolume = 0
     for _, motor in ipairs(model:GetDescendants()) do
         if motor:IsA("Motor6D") and motor.Part0 and motor.Part1 then
             motorCounts[motor.Part1] = (motorCounts[motor.Part1] or 0) + 1
             motors[#motors + 1] = motor
+            local part1 = motor.Part1
+            if part1.Name ~= "Hitbox"
+                and part1.Name ~= "HumanoidRootPart"
+                and motor.Name ~= "ChatBubbleMotor"
+                and not IsRagdollShellPart(part1, model)
+            then
+                largestVolume = math.max(largestVolume, RagdollPartVolume(part1))
+            end
         end
     end
+    -- Scale the cut-off to the creature: small species still ragdoll, while a
+    -- large one only converts its major body sections.
+    local minVolume = math.max(1, largestVolume * RAGDOLL_JOINT_VOLUME_RATIO)
     for _, motor in ipairs(motors) do
         local part0 = motor.Part0
         local part1 = motor.Part1
@@ -1796,7 +1808,7 @@ local function CollectRagdollJoints(model)
             and part0.Name ~= "Hitbox"
             and part1.Name ~= "Hitbox"
             and motor.Name ~= "ChatBubbleMotor"
-            and RagdollPartVolume(part1) >= RAGDOLL_MIN_PART_VOLUME
+            and RagdollPartVolume(part1) >= minVolume
             and not IsRagdollShellPart(part1, model)
             and not seen[part1]
         then
