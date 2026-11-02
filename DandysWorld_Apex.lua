@@ -19,8 +19,8 @@
 -- // Apex Library Loader
 -- The version query bypasses executor HTTP caches that still hold the old
 -- library. LayoutRevision below rejects any stale copy that slips through.
-local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=9"
-local MIN_LAYOUT_REVISION = 9
+local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=10"
+local MIN_LAYOUT_REVISION = 10
 
 local function IsPlusLibrary(library)
     return type(library) == "table"

@@ -18,20 +18,23 @@
       * CFrame Exploit Fly
       * Staff detector
       * Out-of-bounds damage remote removal
+      * Live animation swapper with category filters and random/cycle preview
+      * Client-side ragdoll / unragdoll with optional keybinds
+      * Mandatory menu keybind with no clear option
 
     Run order:
         Run this script. It downloads ApexLibraryPlus.lua from GitHub
         and loads it automatically. Local copies are only a fallback.
 
     Library URL:
-        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=9
+        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=10
 ]================================================================]--
 
 -- // Apex Library Loader
 -- The version query bypasses executor HTTP caches that still hold an old
 -- library. MIN_LAYOUT_REVISION rejects stale copies that slip through.
-local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=9"
-local MIN_LAYOUT_REVISION = 9
+local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=10"
+local MIN_LAYOUT_REVISION = 10
 
 local function IsPlusLibrary(library)
     return type(library) == "table"
@@ -182,10 +185,10 @@ local Workspace = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
 local PlayerName = LocalPlayer.Name
 
-local SCRIPT_VERSION = "COS // APEX 1.1"
+local SCRIPT_VERSION = "COS // APEX 1.2"
 local AUTHOR = "Drk_Duck"
 local ConfigFile = "Cos_Apex_Config.json"
-local CONFIG_VERSION = 2
+local CONFIG_VERSION = 3
 
 -- // Session guard. Re-running the script makes the old loops and callbacks
 -- stop applying effects without touching the newly-created APEX window.
@@ -239,10 +242,19 @@ local Speeds = {
     Sprint = 16,
     Fly = 16,
     ExploitFly = 75,
-    DropDuration = 1,
-    DropSpeed = 1111111,
     ScentPulse = 5,
     AilmentPulse = 8
+}
+
+-- // The instant-menu drop is intentionally fixed. These values are no longer
+-- exposed as controls or loaded from the config file.
+local DROP_DURATION = 1
+local DROP_SPEED = 1111111
+
+-- // Action keybinds owned by this script. false means "no key assigned".
+local Keybinds = {
+    Ragdoll = "R",
+    Unragdoll = "U"
 }
 
 local ESPSettings = {
@@ -256,6 +268,7 @@ local ESPColors = {
     Health = Color3.fromRGB(60, 220, 60),
     LowHealth = Color3.fromRGB(220, 60, 60)
 }
+local DEFAULT_TRAIT_COLOR = Color3.fromRGB(255, 220, 100)
 
 local StatusCards = {}
 local MyWindow = nil
@@ -268,6 +281,39 @@ local function ClampNumber(value, minimum, maximum, fallback)
         number = fallback
     end
     return math.clamp(number, minimum, maximum)
+end
+
+local function IsValidKeyName(value)
+    if type(value) ~= "string" or value == "" then
+        return false
+    end
+    local ok, key = pcall(function()
+        return Enum.KeyCode[value]
+    end)
+    return ok and key ~= nil
+end
+
+local function KeybindToEnum(value)
+    if not IsValidKeyName(value) then
+        return nil
+    end
+    local ok, key = pcall(function()
+        return Enum.KeyCode[value]
+    end)
+    return ok and key or nil
+end
+
+local function KeyToName(key)
+    if key == nil then
+        return false
+    end
+    local ok, name = pcall(function()
+        return key.Name
+    end)
+    if ok and name then
+        return name
+    end
+    return false
 end
 
 local function ColorToTable(color)
@@ -328,8 +374,6 @@ local function LoadScriptConfig()
         Speeds.Sprint = ClampNumber(speeds.Sprint, 1, 5000, Speeds.Sprint)
         Speeds.Fly = ClampNumber(speeds.Fly, 1, 5000, Speeds.Fly)
         Speeds.ExploitFly = ClampNumber(speeds.ExploitFly, 1, 2000, Speeds.ExploitFly)
-        Speeds.DropDuration = ClampNumber(speeds.DropDuration, 0.1, 10, Speeds.DropDuration)
-        Speeds.DropSpeed = ClampNumber(speeds.DropSpeed, 1000, 10000000, Speeds.DropSpeed)
         Speeds.ScentPulse = ClampNumber(speeds.ScentPulse, 1, 60, Speeds.ScentPulse)
         Speeds.AilmentPulse = ClampNumber(speeds.AilmentPulse, 1, 60, Speeds.AilmentPulse)
     end
@@ -344,6 +388,21 @@ local function LoadScriptConfig()
         ESPColors.Aggressive = TableToColor(data.Colors.Aggressive, ESPColors.Aggressive)
         ESPColors.Health = TableToColor(data.Colors.Health, ESPColors.Health)
         ESPColors.LowHealth = TableToColor(data.Colors.LowHealth, ESPColors.LowHealth)
+    end
+
+    if type(data.Keybinds) == "table" then
+        local ragdollKey = data.Keybinds.Ragdoll
+        if ragdollKey == false then
+            Keybinds.Ragdoll = false
+        elseif IsValidKeyName(ragdollKey) then
+            Keybinds.Ragdoll = ragdollKey
+        end
+        local unragdollKey = data.Keybinds.Unragdoll
+        if unragdollKey == false then
+            Keybinds.Unragdoll = false
+        elseif IsValidKeyName(unragdollKey) then
+            Keybinds.Unragdoll = unragdollKey
+        end
     end
 end
 
@@ -361,14 +420,16 @@ local function SaveScriptConfig()
                 Sprint = Speeds.Sprint,
                 Fly = Speeds.Fly,
                 ExploitFly = Speeds.ExploitFly,
-                DropDuration = Speeds.DropDuration,
-                DropSpeed = Speeds.DropSpeed,
                 ScentPulse = Speeds.ScentPulse,
                 AilmentPulse = Speeds.AilmentPulse
             },
             ESP = {
                 FillTransparency = ESPSettings.FillTransparency,
                 MaxDistance = ESPSettings.MaxDistance
+            },
+            Keybinds = {
+                Ragdoll = Keybinds.Ragdoll,
+                Unragdoll = Keybinds.Unragdoll
             },
             Colors = {}
         }
@@ -501,10 +562,17 @@ end
 -- // Minimap ESP. The original forced "Everyone" and reset to "Default".
 -- This build remembers each player's original value and restores it cleanly.
 local MinimapOriginal = {}
+local MinimapVisibilityCache = {}
 
 local function GetMinimapVisibility(player)
+    local cached = MinimapVisibilityCache[player]
+    if cached and cached.Parent then
+        return cached
+    end
     local settings = player:FindFirstChild("Settings")
-    return settings and settings:FindFirstChild("MinimapVisibility") or nil
+    local visibility = settings and settings:FindFirstChild("MinimapVisibility") or nil
+    MinimapVisibilityCache[player] = visibility
+    return visibility
 end
 
 local function ApplyMinimapToPlayer(player)
@@ -543,6 +611,7 @@ local function RestoreMinimap()
         end
     end
     MinimapOriginal = {}
+    MinimapVisibilityCache = {}
 end
 
 -- // Local character / attribute helpers
@@ -568,61 +637,87 @@ local function GetClimberData()
     return playerFolder and playerFolder:FindFirstChild("Data") or nil
 end
 
+-- One character/data lookup per heartbeat. Falls back to the same folder COS
+-- uses for climber writes if the character model has no direct Data child.
+local function GetLocalCharacterAndData()
+    local character = GetLocalCharacter()
+    local data = character and character:FindFirstChild("Data")
+    if data then
+        return character, data
+    end
+    return character, GetClimberData()
+end
+
+local LastClimberData = nil
 local LastClimberState = nil
+
+local function WriteClimberState(data, enabled)
+    if not data then
+        return
+    end
+    if data ~= LastClimberData then
+        LastClimberData = data
+        LastClimberState = nil
+    end
+    if LastClimberState ~= enabled then
+        data:SetAttribute("Climber", enabled)
+        LastClimberState = enabled
+    end
+end
 
 local function SetClimberState(enabled, force)
     local data = GetClimberData()
     if not data then
         return
     end
-    if enabled then
-        data:SetAttribute("Climber", true)
-        LastClimberState = true
-    elseif force or LastClimberState ~= false then
-        data:SetAttribute("Climber", false)
-        LastClimberState = false
+    if force then
+        LastClimberState = nil
+    end
+    WriteClimberState(data, enabled)
+end
+
+local function SetAttributeOnChange(data, name, value)
+    local ok, current = pcall(function()
+        return data:GetAttribute(name)
+    end)
+    if not ok or current ~= value then
+        data:SetAttribute(name, value)
     end
 end
 
-local function EnforceAttributes()
-    local data = GetLocalCharacterData()
+local function EnforceAttributes(data)
+    data = data or GetLocalCharacterData()
     if not data then
         return
     end
 
     if Toggles.InfiniteStamina then
-        data:SetAttribute("st", 99999999999999)
-        data:SetAttribute("sr", 99999999999999)
+        SetAttributeOnChange(data, "st", 99999999999999)
+        SetAttributeOnChange(data, "sr", 99999999999999)
     end
     if Toggles.InfiniteOxygen then
-        data:SetAttribute("Oxygen", 999999999999)
+        SetAttributeOnChange(data, "Oxygen", 999999999999)
     end
     if Toggles.InfiniteMoisture then
-        data:SetAttribute("Moisture", 999999999999)
+        SetAttributeOnChange(data, "Moisture", 999999999999)
     end
     if Toggles.WalkSpeed then
-        data:SetAttribute("s", Speeds.Walk)
+        SetAttributeOnChange(data, "s", Speeds.Walk)
     end
     if Toggles.SprintSpeed then
-        data:SetAttribute("ss", Speeds.Sprint)
+        SetAttributeOnChange(data, "ss", Speeds.Sprint)
     end
     if Toggles.FlySpeed then
-        data:SetAttribute("fs", Speeds.Fly)
+        SetAttributeOnChange(data, "fs", Speeds.Fly)
     end
 end
 
-local function EnforceClimber()
-    local data = GetClimberData()
+local function EnforceClimber(data)
+    data = data or GetClimberData()
     if not data then
         return
     end
-    if Toggles.AlwaysClimber then
-        data:SetAttribute("Climber", true)
-        LastClimberState = true
-    elseif LastClimberState ~= false then
-        data:SetAttribute("Climber", false)
-        LastClimberState = false
-    end
+    WriteClimberState(data, Toggles.AlwaysClimber)
 end
 
 -- // ESP
@@ -769,7 +864,10 @@ local function CreateESPEntry(model)
         healthBarFill = healthBarFill,
         healthText = healthText,
         maxHealth = nil,
-        lastSpecies = nil
+        lastSpecies = nil,
+        cache = {},
+        lastRawName = nil,
+        displayName = nil
     }
 end
 
@@ -803,6 +901,13 @@ local function GetDisplayName(rawName)
         return player.DisplayName
     end
     return rawName
+end
+
+local function SetEntryValue(data, key, instance, property, value)
+    if data.cache[key] ~= value then
+        data.cache[key] = value
+        instance[property] = value
+    end
 end
 
 local function UpdateESPEntry(model, data)
@@ -868,35 +973,46 @@ local function UpdateESPEntry(model, data)
     end
 
     if distance > ESPSettings.MaxDistance then
-        data.billboard.Enabled = false
-        data.highlight.Enabled = false
+        SetEntryValue(data, "billboardEnabled", data.billboard, "Enabled", false)
+        SetEntryValue(data, "highlightEnabled", data.highlight, "Enabled", false)
         return
     end
-    data.billboard.Enabled = true
-    data.highlight.Enabled = true
+    SetEntryValue(data, "billboardEnabled", data.billboard, "Enabled", true)
+    SetEntryValue(data, "highlightEnabled", data.highlight, "Enabled", true)
 
     local color = isAggressive and ESPColors.Aggressive or ESPColors.Outline
-    data.highlight.OutlineColor = color
-    data.highlight.FillColor = color
-    data.highlight.FillTransparency = ESPSettings.FillTransparency
+    SetEntryValue(data, "outlineColor", data.highlight, "OutlineColor", color)
+    SetEntryValue(data, "fillColor", data.highlight, "FillColor", color)
+    SetEntryValue(data, "fillTransparency", data.highlight, "FillTransparency", ESPSettings.FillTransparency)
 
     local sizeY = boxSize and boxSize.Y or 4
-    data.billboard.StudsOffsetWorldSpace = Vector3.new(0, sizeY * 0.5 + 1.5, 0)
+    if data.cache.studsOffsetY ~= sizeY then
+        data.cache.studsOffsetY = sizeY
+        data.billboard.StudsOffsetWorldSpace = Vector3.new(0, sizeY * 0.5 + 1.5, 0)
+    end
 
     local scale = 1
     if distance > 200 then
         scale = math.clamp((200 / distance), 0.30, 1)
     end
-    data.billboard.Size = UDim2.fromOffset(220 * scale, 90 * scale)
+    scale = math.floor(scale * 20 + 0.5) / 20
+    if data.cache.scale ~= scale then
+        data.cache.scale = scale
+        data.billboard.Size = UDim2.fromOffset(math.floor(220 * scale + 0.5), math.floor(90 * scale + 0.5))
+    end
 
-    data.playerLabel.TextSize = math.max(10, math.floor(15 * scale))
-    data.nameLabel.TextSize = math.max(10, math.floor(16 * scale))
-    data.traitsLabel.TextSize = math.max(9, math.floor(13 * scale))
-    data.healthText.TextSize = math.max(9, math.floor(12 * scale))
+    SetEntryValue(data, "playerTextSize", data.playerLabel, "TextSize", math.max(10, math.floor(15 * scale)))
+    SetEntryValue(data, "nameTextSize", data.nameLabel, "TextSize", math.max(10, math.floor(16 * scale)))
+    SetEntryValue(data, "traitsTextSize", data.traitsLabel, "TextSize", math.max(9, math.floor(13 * scale)))
+    SetEntryValue(data, "healthTextSize", data.healthText, "TextSize", math.max(9, math.floor(12 * scale)))
 
     local rawName = model.Name:gsub("^@", "")
-    data.playerLabel.Text = GetDisplayName(rawName)
-    data.nameLabel.Text = species .. (isAggressive and "  ⚠" or "")
+    if data.lastRawName ~= rawName then
+        data.lastRawName = rawName
+        data.displayName = GetDisplayName(rawName)
+    end
+    SetEntryValue(data, "playerText", data.playerLabel, "Text", data.displayName or rawName)
+    SetEntryValue(data, "nameText", data.nameLabel, "Text", species .. (isAggressive and "  ⚠" or ""))
 
     local venText = venStage ~= nil and ("Ven " .. tostring(venStage)) or ""
     local aggroText = isAggressive and "Aggressive" or ""
@@ -912,27 +1028,42 @@ local function UpdateESPEntry(model, data)
         table.insert(parts, venText)
     end
     table.insert(parts, distanceText)
-    data.traitsLabel.Text = table.concat(parts, "  |  ")
-    data.traitsLabel.TextColor3 = isAggressive and ESPColors.Aggressive or Color3.fromRGB(255, 220, 100)
+    SetEntryValue(data, "traitsText", data.traitsLabel, "Text", table.concat(parts, "  |  "))
+    SetEntryValue(data, "traitsColor", data.traitsLabel, "TextColor3",
+        isAggressive and ESPColors.Aggressive or DEFAULT_TRAIT_COLOR)
 
     local showHealth = Toggles.ShowHealthBar
-    data.healthBarBg.Visible = showHealth
-    data.healthText.Visible = showHealth
+    SetEntryValue(data, "healthBarVisible", data.healthBarBg, "Visible", showHealth)
+    SetEntryValue(data, "healthTextVisible", data.healthText, "Visible", showHealth)
     if showHealth then
         local percent = math.clamp(health / math.max(maxHealth, 1), 0, 1)
-        data.healthBarFill.Size = UDim2.new(percent, 0, 1, 0)
-        data.healthBarFill.BackgroundColor3 = percent <= 0.25 and ESPColors.LowHealth or ESPColors.Health
-        data.healthText.Text = string.format("%d/%d", math.floor(health), math.floor(maxHealth))
+        local percentKey = math.floor(percent * 100 + 0.5)
+        if data.cache.healthPercent ~= percentKey then
+            data.cache.healthPercent = percentKey
+            data.healthBarFill.Size = UDim2.new(percentKey / 100, 0, 1, 0)
+        end
+        SetEntryValue(data, "healthFillColor", data.healthBarFill, "BackgroundColor3",
+            percent <= 0.25 and ESPColors.LowHealth or ESPColors.Health)
+        SetEntryValue(data, "healthText", data.healthText, "Text",
+            string.format("%d/%d", math.floor(health), math.floor(maxHealth)))
     end
 end
 
-local function UpdateESP()
+local NextESPUpdate = 0
+
+local function UpdateESP(force)
     if not Toggles.OutlineESP then
         if next(espData) ~= nil then
             ClearESP()
         end
         return
     end
+
+    local now = os.clock()
+    if not force and now < NextESPUpdate then
+        return
+    end
+    NextESPUpdate = now + 0.1
 
     local charactersFolder = Workspace:FindFirstChild("Characters")
     if not charactersFolder then
@@ -986,7 +1117,7 @@ local function StartInstantDrop(ignoreToggle)
     DropInProgress = true
     task.spawn(function()
         local startedAt = os.clock()
-        local duration = Speeds.DropDuration
+        local duration = DROP_DURATION
         while SessionActive() and (os.clock() - startedAt) < duration and (ignoreToggle or Toggles.InstantMenu) do
             local deltaTime = task.wait()
             local character = GetLocalCharacter()
@@ -994,7 +1125,7 @@ local function StartInstantDrop(ignoreToggle)
             if not currentRoot then
                 break
             end
-            currentRoot.CFrame = currentRoot.CFrame * CFrame.new(0, -(Speeds.DropSpeed * deltaTime), 0)
+            currentRoot.CFrame = currentRoot.CFrame * CFrame.new(0, -(DROP_SPEED * deltaTime), 0)
         end
         DropInProgress = false
     end)
@@ -1093,6 +1224,47 @@ local function GetBarByKind(barsFrame, kind)
     return nil
 end
 
+-- Resolved bar references are reused for two seconds instead of walking the
+-- HUD tree on every heartbeat. Missing parents force an immediate refresh.
+local HUDBarCache = {}
+local HUDBarCacheAt = 0
+local HUDBarCacheGui = nil
+local HUD_BAR_CACHE_TTL = 2
+
+local function RefreshHUDBarCache(hudGui)
+    HUDBarCache = {}
+    for _, frameName in ipairs({ "Other", "Mobile" }) do
+        local barsFrame = GetBarsFrame(hudGui, frameName)
+        if barsFrame then
+            HUDBarCache[frameName] = {
+                Oxygen = GetBarByKind(barsFrame, "Oxygen"),
+                Moisture = GetBarByKind(barsFrame, "Moisture")
+            }
+        end
+    end
+    HUDBarCacheAt = os.clock()
+    HUDBarCacheGui = hudGui
+end
+
+local function GetHUDBarCache(hudGui)
+    local now = os.clock()
+    if hudGui ~= HUDBarCacheGui
+        or now - HUDBarCacheAt > HUD_BAR_CACHE_TTL
+        or next(HUDBarCache) == nil then
+        RefreshHUDBarCache(hudGui)
+        return HUDBarCache
+    end
+
+    for _, entry in pairs(HUDBarCache) do
+        if (entry.Oxygen and not entry.Oxygen.Parent)
+            or (entry.Moisture and not entry.Moisture.Parent) then
+            RefreshHUDBarCache(hudGui)
+            break
+        end
+    end
+    return HUDBarCache
+end
+
 -- Writes Visibility without letting our own change echo back into the
 -- property listener that tracks what the game wants the bar to do.
 local function WriteBarVisible(entry, bar, visible)
@@ -1166,11 +1338,12 @@ local function EnforceHUDVisibility()
             HUDHiddenBars[bar] = nil
         end
     end
+    local cache = GetHUDBarCache(hudGui)
     for _, frameName in ipairs({ "Other", "Mobile" }) do
-        local barsFrame = GetBarsFrame(hudGui, frameName)
-        if barsFrame then
-            SetHUDHidden(GetBarByKind(barsFrame, "Oxygen"), Toggles.InfiniteOxygen)
-            SetHUDHidden(GetBarByKind(barsFrame, "Moisture"), Toggles.InfiniteMoisture)
+        local cached = cache[frameName]
+        if cached then
+            SetHUDHidden(cached.Oxygen, Toggles.InfiniteOxygen)
+            SetHUDHidden(cached.Moisture, Toggles.InfiniteMoisture)
         end
     end
 end
@@ -1196,6 +1369,26 @@ local ANIMATION_CATALOG = {}
 local ANIMATION_SPECIES_COUNTS = {}
 local ANIMATION_CURRENT_SPECIES = nil
 local ANIMATION_CATALOG_READY = false
+local ANIMATION_CATEGORIES = { "ALL", "MOVE", "SWIM", "POSE", "ACTION" }
+local ANIMATION_CATEGORY_KEYWORDS = {
+    SWIM = { "swim", "dive" },
+    MOVE = { "walk", "run", "jump", "fly", "glide", "flap", "fall", "grab" },
+    POSE = { "idle", "sit", "lay", "pose", "mud", "beach", "rest", "sleep" }
+}
+local ANIMATION_CATEGORY_ORDER = { "SWIM", "MOVE", "POSE" }
+
+local function GetAnimationCategory(animationName)
+    local lowerName = string.lower(tostring(animationName or ""))
+    for _, category in ipairs(ANIMATION_CATEGORY_ORDER) do
+        for _, keyword in ipairs(ANIMATION_CATEGORY_KEYWORDS[category]) do
+            if string.find(lowerName, keyword, 1, true) then
+                return category
+            end
+        end
+    end
+    return "ACTION"
+end
+
 local ANIMATION_PREVIEW = {
     Active = false,
     Name = nil,
@@ -1212,6 +1405,9 @@ local AnimationUI = {
     ScopeButton = nil,
     LoopButton = nil,
     Refresh = nil,
+    Category = "ALL",
+    Filtered = {},
+    CategoryButtons = {},
     LastStatus = {}
 }
 local PlayerWrapperModule = nil
@@ -1316,7 +1512,8 @@ local function BuildAnimationCatalog()
                         catalog[#catalog + 1] = {
                             Name = animation.Name,
                             Species = speciesName,
-                            AnimationId = animationId
+                            AnimationId = animationId,
+                            Category = GetAnimationCategory(animation.Name)
                         }
                         counts[speciesName] = (counts[speciesName] or 0) + 1
                     end
@@ -1435,10 +1632,164 @@ local function RestoreOriginalAnimations()
     UpdateAnimationStatus(true)
 end
 
+-- // Ragdoll -----------------------------------------------------------
+-- COS rigs do not use a Humanoid, so this is a client-side tumble: the root
+-- is rotated each frame, BodyGyro follows it, and BodyVelocity adds a slow
+-- directional roll with occasional small hops. UNRAGDOLL rights the rig.
+local RagdollState = {
+    Active = false,
+    Character = nil,
+    Root = nil,
+    Connection = nil,
+    Spin = Vector3.new(0, 0, 0),
+    Direction = Vector3.new(0, 0, 0),
+    NextDirection = 0,
+    NextHop = 0,
+    HopUntil = 0
+}
+
+local function StopRagdoll(silent)
+    if not RagdollState.Active then
+        return
+    end
+    RagdollState.Active = false
+
+    if RagdollState.Connection then
+        pcall(function()
+            RagdollState.Connection:Disconnect()
+        end)
+        RagdollState.Connection = nil
+    end
+
+    local character = RagdollState.Character
+    local root = RagdollState.Root
+    if root and root.Parent then
+        local yaw = 0
+        local ok, orientation = pcall(function()
+            local _, currentYaw = root.CFrame:ToOrientation()
+            return currentYaw
+        end)
+        if ok and orientation then
+            yaw = orientation
+        end
+        local upright = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+        pcall(function()
+            root.CFrame = upright
+        end)
+        if character and character.BodyGyro then
+            pcall(function()
+                character.BodyGyro.CFrame = upright
+            end)
+        end
+        if character and character.BodyVelocity then
+            pcall(function()
+                character.BodyVelocity.Velocity = Vector3.new(0, 0, 0)
+            end)
+        end
+    end
+
+    RagdollState.Character = nil
+    RagdollState.Root = nil
+    RagdollState.Direction = Vector3.new(0, 0, 0)
+    RagdollState.NextDirection = 0
+    RagdollState.NextHop = 0
+    RagdollState.HopUntil = 0
+
+    if not silent and SafeSetStatus then
+        SafeSetStatus("RAGDOLL_OFF")
+    end
+end
+
+local function StartRagdoll()
+    if RagdollState.Active then
+        if SafeSetStatus then
+            SafeSetStatus("RAGDOLL_ON")
+        end
+        return true
+    end
+
+    local character = GetCosCharacter()
+    if not character or not character.Root or not character.Root.Parent then
+        if SafeSetStatus then
+            SafeSetStatus("RAGDOLL_NO_CREATURE")
+        end
+        return false
+    end
+
+    pcall(RestoreOriginalAnimations)
+
+    RagdollState.Active = true
+    RagdollState.Character = character
+    RagdollState.Root = character.Root
+    RagdollState.Spin = Vector3.new(
+        math.random(-45, 45) / 10,
+        math.random(-45, 45) / 10,
+        math.random(-45, 45) / 10
+    )
+    RagdollState.Direction = Vector3.new(0, 0, 0)
+    RagdollState.NextDirection = 0
+    RagdollState.NextHop = 0
+    RagdollState.HopUntil = 0
+
+    RagdollState.Connection = RunService.RenderStepped:Connect(function(deltaTime)
+        if not SessionActive() then
+            StopRagdoll(true)
+            return
+        end
+
+        local root = RagdollState.Root
+        local rig = RagdollState.Character
+        if not root or not root.Parent or not rig then
+            StopRagdoll(true)
+            return
+        end
+
+        local dt = math.clamp(deltaTime or 0.016, 0, 0.1)
+        local now = os.clock()
+
+        if now >= RagdollState.NextDirection then
+            local angle = math.random() * math.pi * 2
+            RagdollState.Direction = Vector3.new(math.cos(angle), 0, math.sin(angle))
+            RagdollState.NextDirection = now + (math.random(7, 14) / 10)
+        end
+
+        if now >= RagdollState.NextHop then
+            RagdollState.HopUntil = now + 0.22
+            RagdollState.NextHop = now + math.random(2, 5)
+        end
+
+        local spin = RagdollState.Spin
+        root.CFrame = root.CFrame * CFrame.Angles(spin.X * dt, spin.Y * dt, spin.Z * dt)
+        if rig.BodyGyro then
+            pcall(function()
+                rig.BodyGyro.CFrame = root.CFrame
+            end)
+        end
+
+        local vertical = now < RagdollState.HopUntil and 18 or 0
+        if rig.BodyVelocity then
+            pcall(function()
+                rig.BodyVelocity.Velocity = Vector3.new(
+                    RagdollState.Direction.X * 11,
+                    vertical,
+                    RagdollState.Direction.Z * 11
+                )
+            end)
+        end
+    end)
+
+    if SafeSetStatus then
+        SafeSetStatus("RAGDOLL_ON")
+    end
+    return true
+end
+
 local function PreviewAnimation(entry)
     if type(entry) ~= "table" or not entry.Name or not entry.AnimationId then
         return false, "Invalid animation"
     end
+
+    StopRagdoll(true)
 
     local character = GetCosCharacter()
     if not character then
@@ -1548,13 +1899,15 @@ end
 local function GetFilteredAnimations(query)
     local results = {}
     local currentSpecies = ANIMATION_CURRENT_SPECIES
+    local category = AnimationUI.Category or "ALL"
     for _, entry in ipairs(ANIMATION_CATALOG) do
         if Toggles.AnimationSearchAll or (currentSpecies and entry.Species == currentSpecies) then
             local nameLower = string.lower(entry.Name)
             local speciesLower = string.lower(entry.Species)
-            if query == ""
+            local categoryMatches = category == "ALL" or entry.Category == category
+            if categoryMatches and (query == ""
                 or string.find(nameLower, query, 1, true)
-                or string.find(speciesLower, query, 1, true) then
+                or string.find(speciesLower, query, 1, true)) then
                 results[#results + 1] = entry
             end
         end
@@ -1586,6 +1939,56 @@ local function GetFilteredAnimations(query)
     return results
 end
 
+local function SetAnimationStatus(text)
+    if SafeSetStatus then
+        SafeSetStatus(text)
+    end
+end
+
+local function GetActionAnimationResults()
+    return GetFilteredAnimations(GetAnimationQuery())
+end
+
+local function PreviewRandomAnimation()
+    local filtered = GetActionAnimationResults()
+    if #filtered == 0 then
+        SetAnimationStatus("ANIM_NO_MATCHES")
+        return
+    end
+    local entry = filtered[math.random(1, #filtered)]
+    local ok = PreviewAnimation(entry)
+    SetAnimationStatus(ok and "ANIM_RANDOM" or "ANIMATION_FAILED")
+end
+
+local function CycleAnimation(step)
+    local filtered = GetActionAnimationResults()
+    if #filtered == 0 then
+        SetAnimationStatus("ANIM_NO_MATCHES")
+        return
+    end
+
+    local index = 0
+    if ANIMATION_PREVIEW.Name then
+        for position, entry in ipairs(filtered) do
+            if entry.Name == ANIMATION_PREVIEW.Name and entry.Species == ANIMATION_PREVIEW.Species then
+                index = position
+                break
+            end
+        end
+    end
+
+    index = index + (step or 1)
+    if index < 1 then
+        index = #filtered
+    elseif index > #filtered then
+        index = 1
+    end
+
+    local entry = filtered[index]
+    local ok = PreviewAnimation(entry)
+    SetAnimationStatus(ok and "ANIM_CYCLE" or "ANIMATION_FAILED")
+end
+
 local function UpdateAnimationScopeButton()
     if not AnimationUI.ScopeButton then
         return
@@ -1608,6 +2011,7 @@ local function RenderAnimationResults()
 
     local query = GetAnimationQuery()
     local filtered = GetFilteredAnimations(query)
+    AnimationUI.Filtered = filtered
     results:Clear()
 
     local shown = 0
@@ -1702,6 +2106,9 @@ CleanupSession = function()
     pcall(RestoreMinimap)
     pcall(ClearESP)
     pcall(RestoreHUDVisibility)
+    pcall(function()
+        StopRagdoll(true)
+    end)
     pcall(RestoreOriginalAnimations)
     pcall(function()
         SetClimberState(false, true)
@@ -1730,9 +2137,22 @@ CleanupSession = function()
 end
 
 -- // Shared inputs
+local function IsTypingInTextBox()
+    local ok, focused = pcall(function()
+        if type(UserInputService.GetFocusedTextBox) ~= "function" then
+            return nil
+        end
+        return UserInputService:GetFocusedTextBox()
+    end)
+    return ok and focused ~= nil
+end
+
 TrackConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not SessionActive() or gameProcessed then
         return
+    end
+    if input.KeyCode == Enum.KeyCode.N and not MyWindow.IsListeningForKey and not IsTypingInTextBox() then
+        CycleAnimation(1)
     end
     if flyInputs[input.KeyCode.Name] ~= nil then
         flyInputs[input.KeyCode.Name] = true
@@ -1764,11 +2184,13 @@ end
 if Players.PlayerRemoving then
     TrackConnection(Players.PlayerRemoving:Connect(function(player)
         MinimapOriginal[player] = nil
+        MinimapVisibilityCache[player] = nil
     end))
 end
 
 if LocalPlayer.CharacterAdded then
     TrackConnection(LocalPlayer.CharacterAdded:Connect(function()
+        StopRagdoll(true)
         ANIMATION_CURRENT_SPECIES = nil
         pcall(RestoreOriginalAnimations)
         UpdateAnimationStatus(true)
@@ -1777,6 +2199,7 @@ end
 
 if LocalPlayer.CharacterRemoving then
     TrackConnection(LocalPlayer.CharacterRemoving:Connect(function()
+        StopRagdoll(true)
         pcall(StopForeignPreview)
         ANIMATION_PREVIEW.Active = false
         ANIMATION_PREVIEW.Name = nil
@@ -1788,20 +2211,24 @@ end
 
 -- // Main heartbeat: staff scan, minimap enforcement, attributes, status.
 local NextMinimapUpdate = 0
+local NextStaffScan = 0
 TrackConnection(RunService.Heartbeat:Connect(function()
     if not SessionActive() then
         CleanupSession()
         return
     end
 
-    for _, player in ipairs(Players:GetPlayers()) do
-        if CheckPlayerForStaff(player) then
-            break
+    local now = os.clock()
+    if now >= NextStaffScan then
+        NextStaffScan = now + 1
+        for _, player in ipairs(Players:GetPlayers()) do
+            if CheckPlayerForStaff(player) then
+                break
+            end
         end
     end
 
     if Toggles.MinimapESP then
-        local now = os.clock()
         if now >= NextMinimapUpdate then
             ApplyMinimapNow()
             NextMinimapUpdate = now + 0.25
@@ -1810,8 +2237,11 @@ TrackConnection(RunService.Heartbeat:Connect(function()
         NextMinimapUpdate = 0
     end
 
-    EnforceClimber()
-    EnforceAttributes()
+    local _, localData = GetLocalCharacterAndData()
+    if localData then
+        EnforceClimber(localData)
+        EnforceAttributes(localData)
+    end
     UpdateESP()
     if Toggles.InfiniteOxygen or Toggles.InfiniteMoisture then
         EnforceHUDVisibility()
@@ -1971,34 +2401,6 @@ local function BuildUI()
             "Run the downward CFrame drop once, even if the toggle is off.",
             function()
                 StartInstantDrop(true)
-            end
-        )
-
-        local durationInput
-        durationInput = tab:CreateInputCard(
-            "DROP_DURATION",
-            "Seconds the downward drop lasts (default 1, range 0.1-10)",
-            Speeds.DropDuration,
-            function(value)
-                Speeds.DropDuration = ClampNumber(value, 0.1, 10, Speeds.DropDuration)
-                if durationInput then
-                    durationInput:SetValue(Speeds.DropDuration)
-                end
-                SaveScriptConfig()
-            end
-        )
-
-        local dropSpeedInput
-        dropSpeedInput = tab:CreateInputCard(
-            "DROP_SPEED",
-            "Downward studs per second (default 1111111)",
-            Speeds.DropSpeed,
-            function(value)
-                Speeds.DropSpeed = ClampNumber(value, 1000, 10000000, Speeds.DropSpeed)
-                if dropSpeedInput then
-                    dropSpeedInput:SetValue(Speeds.DropSpeed)
-                end
-                SaveScriptConfig()
             end
         )
 
@@ -2307,14 +2709,14 @@ local function BuildUI()
         local theme = ApexLibrary.Theme
         local card = Instance.new("Frame")
         card.Name = "AnimationSwapperCard"
-        card.Size = UDim2.new(1, 0, 0, 356)
+        card.Size = UDim2.new(1, 0, 0, 420)
         card.BackgroundColor3 = theme.Card
         card.BorderSizePixel = 0
         card.Parent = tab:GetContainer()
 
         local title = Instance.new("TextLabel")
-        title.Size = UDim2.new(1, -24, 0, 18)
-        title.Position = UDim2.new(0, 12, 0, 8)
+        title.Size = UDim2.new(1, -32, 0, 18)
+        title.Position = UDim2.new(0, 16, 0, 8)
         title.BackgroundTransparency = 1
         title.Font = Enum.Font.RobotoMono
         title.Text = "ANIMATION SEARCH"
@@ -2331,8 +2733,8 @@ local function BuildUI()
         end
 
         local desc = Instance.new("TextLabel")
-        desc.Size = UDim2.new(1, -24, 0, 16)
-        desc.Position = UDim2.new(0, 12, 0, 26)
+        desc.Size = UDim2.new(1, -32, 0, 16)
+        desc.Position = UDim2.new(0, 16, 0, 26)
         desc.BackgroundTransparency = 1
         desc.Font = Enum.Font.Roboto
         desc.Text = "Type to filter. Click a result to preview it on your current creature."
@@ -2343,8 +2745,8 @@ local function BuildUI()
 
         local searchBox = Instance.new("TextBox")
         searchBox.Name = "AnimationSearchBox"
-        searchBox.Size = UDim2.new(1, -24, 0, 30)
-        searchBox.Position = UDim2.new(0, 12, 0, 48)
+        searchBox.Size = UDim2.new(1, -32, 0, 30)
+        searchBox.Position = UDim2.new(0, 16, 0, 48)
         searchBox.BackgroundColor3 = theme.Input
         searchBox.BorderSizePixel = 0
         searchBox.Font = Enum.Font.RobotoMono
@@ -2359,12 +2761,16 @@ local function BuildUI()
         searchStroke.Color = theme.Border
         searchStroke.Thickness = 1
         searchStroke.Parent = searchBox
+        local searchPadding = Instance.new("UIPadding")
+        searchPadding.PaddingLeft = UDim.new(0, 10)
+        searchPadding.PaddingRight = UDim.new(0, 10)
+        searchPadding.Parent = searchBox
         searchBox.Parent = card
 
         local scopeButton = Instance.new("TextButton")
         scopeButton.Name = "AnimationScopeButton"
-        scopeButton.Size = UDim2.new(0.5, -18, 0, 24)
-        scopeButton.Position = UDim2.new(0, 12, 0, 86)
+        scopeButton.Size = UDim2.new(0.5, -20, 0, 24)
+        scopeButton.Position = UDim2.new(0, 16, 0, 86)
         scopeButton.BackgroundColor3 = theme.Input
         scopeButton.BorderSizePixel = 0
         scopeButton.Font = Enum.Font.RobotoMono
@@ -2380,8 +2786,8 @@ local function BuildUI()
 
         local loopButton = Instance.new("TextButton")
         loopButton.Name = "AnimationLoopButton"
-        loopButton.Size = UDim2.new(0.5, -18, 0, 24)
-        loopButton.Position = UDim2.new(0.5, 6, 0, 86)
+        loopButton.Size = UDim2.new(0.5, -20, 0, 24)
+        loopButton.Position = UDim2.new(0.5, 4, 0, 86)
         loopButton.BackgroundColor3 = theme.Input
         loopButton.BorderSizePixel = 0
         loopButton.Font = Enum.Font.RobotoMono
@@ -2395,10 +2801,92 @@ local function BuildUI()
         loopStroke.Thickness = 1
         loopStroke.Parent = loopButton
 
+        local UpdateCategoryButtons
+        local categoryButtons = {}
+        for index, category in ipairs(ANIMATION_CATEGORIES) do
+            local button = Instance.new("TextButton")
+            button.Name = "AnimationCategory_" .. category
+            button.Size = UDim2.new(0, 60, 0, 22)
+            button.Position = UDim2.new(0, 16 + (index - 1) * 66, 0, 116)
+            button.BackgroundColor3 = theme.Input
+            button.BorderSizePixel = 0
+            button.Font = Enum.Font.RobotoMono
+            button.Text = category
+            button.TextColor3 = theme.Muted
+            button.TextSize = 10
+            button.AutoButtonColor = false
+            button.Parent = card
+            local stroke = Instance.new("UIStroke")
+            stroke.Color = theme.Border
+            stroke.Thickness = 1
+            stroke.Parent = button
+            categoryButtons[category] = { Button = button, Stroke = stroke }
+            button.Activated:Connect(function()
+                AnimationUI.Category = category
+                UpdateCategoryButtons()
+                RenderAnimationResults()
+                SafeSetStatus("ANIM_FILTER_" .. category)
+            end)
+        end
+        AnimationUI.CategoryButtons = categoryButtons
+
+        UpdateCategoryButtons = function()
+            local accent = GetAccentColor()
+            for category, entry in pairs(categoryButtons) do
+                local active = AnimationUI.Category == category
+                entry.Button.BackgroundColor3 = active and accent or theme.Input
+                entry.Button.TextColor3 = active and theme.Text or theme.Muted
+                entry.Stroke.Color = active and accent or theme.Border
+            end
+        end
+        UpdateCategoryButtons()
+        MyWindow:RegisterAccentListener(function()
+            UpdateCategoryButtons()
+        end)
+
+        local randomButton = Instance.new("TextButton")
+        randomButton.Name = "AnimationRandomButton"
+        randomButton.Size = UDim2.new(0.5, -20, 0, 24)
+        randomButton.Position = UDim2.new(0, 16, 0, 144)
+        randomButton.BackgroundColor3 = theme.Input
+        randomButton.BorderSizePixel = 0
+        randomButton.Font = Enum.Font.RobotoMono
+        randomButton.Text = "RANDOM PREVIEW"
+        randomButton.TextColor3 = theme.Text
+        randomButton.TextSize = 10
+        randomButton.AutoButtonColor = false
+        randomButton.Parent = card
+        local randomStroke = Instance.new("UIStroke")
+        randomStroke.Color = theme.Border
+        randomStroke.Thickness = 1
+        randomStroke.Parent = randomButton
+
+        local nextButton = Instance.new("TextButton")
+        nextButton.Name = "AnimationNextButton"
+        nextButton.Size = UDim2.new(0.5, -20, 0, 24)
+        nextButton.Position = UDim2.new(0.5, 4, 0, 144)
+        nextButton.BackgroundColor3 = theme.Input
+        nextButton.BorderSizePixel = 0
+        nextButton.Font = Enum.Font.RobotoMono
+        nextButton.Text = "NEXT PREVIEW [N]"
+        nextButton.TextColor3 = theme.Text
+        nextButton.TextSize = 10
+        nextButton.AutoButtonColor = false
+        nextButton.Parent = card
+        local nextStroke = Instance.new("UIStroke")
+        nextStroke.Color = theme.Border
+        nextStroke.Thickness = 1
+        nextStroke.Parent = nextButton
+
+        randomButton.Activated:Connect(PreviewRandomAnimation)
+        nextButton.Activated:Connect(function()
+            CycleAnimation(1)
+        end)
+
         local countLabel = Instance.new("TextLabel")
         countLabel.Name = "AnimationMatchCount"
-        countLabel.Size = UDim2.new(1, -24, 0, 14)
-        countLabel.Position = UDim2.new(0, 12, 1, -18)
+        countLabel.Size = UDim2.new(1, -42, 0, 14)
+        countLabel.Position = UDim2.new(0, 26, 1, -18)
         countLabel.BackgroundTransparency = 1
         countLabel.Font = Enum.Font.RobotoMono
         countLabel.Text = "0 MATCHES"
@@ -2409,8 +2897,8 @@ local function BuildUI()
 
         local scroll = Instance.new("ScrollingFrame")
         scroll.Name = "AnimationResults"
-        scroll.Size = UDim2.new(1, -24, 0, 208)
-        scroll.Position = UDim2.new(0, 12, 0, 120)
+        scroll.Size = UDim2.new(1, -32, 0, 208)
+        scroll.Position = UDim2.new(0, 16, 0, 176)
         scroll.BackgroundTransparency = 1
         scroll.BorderSizePixel = 0
         scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
@@ -2452,6 +2940,10 @@ local function BuildUI()
             label.TextYAlignment = Enum.TextYAlignment.Top
             label.LayoutOrder = order
             label.Parent = scroll
+            local labelPadding = Instance.new("UIPadding")
+            labelPadding.PaddingLeft = UDim.new(0, 10)
+            labelPadding.PaddingRight = UDim.new(0, 8)
+            labelPadding.Parent = label
             return label
         end
         function resultsAPI:AddButton(text, color, callback)
@@ -2464,8 +2956,14 @@ local function BuildUI()
             button.Text = tostring(text)
             button.TextColor3 = color or theme.Text
             button.TextSize = 11
+            button.TextXAlignment = Enum.TextXAlignment.Left
+            button.TextTruncate = Enum.TextTruncate.AtEnd
             button.LayoutOrder = order
             button.Parent = scroll
+            local buttonPadding = Instance.new("UIPadding")
+            buttonPadding.PaddingLeft = UDim.new(0, 10)
+            buttonPadding.PaddingRight = UDim.new(0, 8)
+            buttonPadding.Parent = button
             local stroke = Instance.new("UIStroke")
             stroke.Color = color or theme.Border
             stroke.Transparency = 0.35
@@ -2524,6 +3022,40 @@ local function BuildUI()
         RenderAnimationResults()
         UpdateAnimationStatus(true)
 
+        tab:CreateSectionLabel("RAGDOLL CONTROLS")
+        tab:CreateKeybindButton(
+            "RAGDOLL",
+            "Tumble and roll the current creature. The keybind is optional; clear it with X or click the action button.",
+            {
+                Key = KeybindToEnum(Keybinds.Ragdoll),
+                Required = false,
+                ActionText = "RAGDOLL",
+                OnActivated = function()
+                    StartRagdoll()
+                end,
+                OnKeyChanged = function(key)
+                    Keybinds.Ragdoll = KeyToName(key)
+                    SaveScriptConfig()
+                end
+            }
+        )
+        tab:CreateKeybindButton(
+            "UNRAGDOLL",
+            "Stop the tumble, right the creature, and return control to COS.",
+            {
+                Key = KeybindToEnum(Keybinds.Unragdoll),
+                Required = false,
+                ActionText = "RESTORE",
+                OnActivated = function()
+                    StopRagdoll(false)
+                end,
+                OnKeyChanged = function(key)
+                    Keybinds.Unragdoll = KeyToName(key)
+                    SaveScriptConfig()
+                end
+            }
+        )
+
         tab:CreateButton(
             "RESTORE_ORIGINAL_ANIMATIONS",
             "Stop the preview and return the current creature to its own animation set.",
@@ -2554,7 +3086,25 @@ local function BuildUI()
     -- CONFIG ---------------------------------------------------------------
     BuildTab("CONFIG", "INTERFACE & STORAGE", function(tab)
         if not UserInputService.TouchEnabled then
-            tab:CreateKeybindCard()
+            tab:CreateKeybindButton(
+                "OPEN / CLOSE MENU",
+                "Mandatory window keybind. Click the key chip to rebind. This binding cannot be cleared.",
+                {
+                    Key = MyWindow.CurrentHideKey,
+                    Required = true,
+                    TriggerOnKey = false,
+                    ActionText = "TOGGLE",
+                    OnActivated = function()
+                        MyWindow:SetVisible(not MyWindow.IsUIVisible)
+                    end,
+                    OnKeyChanged = function(key)
+                        if key then
+                            MyWindow.CurrentHideKey = key
+                            MyWindow:SaveSettings()
+                        end
+                    end
+                }
+            )
         end
         tab:CreateKillButton("KILL SCRIPT & CLEANUP", function()
             MyWindow:Unload()

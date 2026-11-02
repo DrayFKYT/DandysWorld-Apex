@@ -28,12 +28,20 @@ The `ANIMATION` tab adds a live animation swapper:
 
 - Search the full game catalog (477 species, 7,293 animation assets, 40 unique animation names)
 - Scope the search to the current creature or all creatures
+- Filter results by `ALL`, `MOVE`, `SWIM`, `POSE`, or `ACTION`
+- Random preview button plus an `N` hotkey that cycles the filtered results
 - Preview current-creature animations through COS's own fake-state system
 - Preview foreign animations on the current rig through the creature `Animator`
 - Loop toggle, reset to the current creature's original animation, and catalog refresh
 - Automatic preview cleanup on species change, respawn, or script unload
 
+The same tab has `RAGDOLL` and `UNRAGDOLL` action rows. Ragdoll tumbles the rig with a client-side roll and small hops; unragdoll rights it and returns control to COS. Both rows have optional programmable keybinds, defaulting to `R` and `U`; press the adjacent `X` to clear a binding to `NONE`.
+
+The instant-menu drop timing is fixed at 1 second and 1,111,111 studs/second. `DROP_DURATION` and `DROP_SPEED` are no longer editable controls and are not read from the config file.
+
 While `INFINITE_OXYGEN` is enabled the `BREATH` HUD bar is hidden; while `INFINITE_MOISTURE` is enabled the `MOISTURE` HUD bar is hidden. Both bars return to their normal state when the toggles are turned off or the script is cleaned up.
+
+The `CONFIG` tab's `OPEN / CLOSE MENU` row is a mandatory keybind: clicking the key chip rebinds it, but the binding cannot be cleared and the row never shows an `X`.
 
 ## Library
 
@@ -43,7 +51,7 @@ The interface is provided by [Apex-Gui-library](https://github.com/DrayFKYT/Apex
 https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua
 ```
 
-Both scripts download revision 9 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development.
+Both scripts download revision 10 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 10 adds `Tab:CreateKeybindButton`: an action card with a programmable key chip and an optional clear `X`.
 
 ## Documentation
 
@@ -63,10 +71,11 @@ Autofarm safety runs away from the current attacker (or the combined direction o
 
 - `ApexLibrary_Config.json` — shared APEX UI settings (accent color, hide key, mobile lock, mobile button position)
 - `DandysWorld_Apex_Config.json` — Dandy's World toggles and ESP colors
-- `Cos_Apex_Config.json` — Creatures of Sonaria toggles, speeds, and animation preferences
+- `Cos_Apex_Config.json` — Creatures of Sonaria toggles, speeds, animation preferences, and ragdoll keybinds
 
 ## Notes
 
-- Default hide key: `RightControl`
+- Default menu keybind: `RightControl` (mandatory, no clear button)
+- Default ragdoll keybinds: `R` to ragdoll, `U` to unragdoll (optional, clearable)
 - Every script includes a fixed `KILL SCRIPT & CLEANUP` action in `CONFIG`
 - Original Creatures of Sonaria gameplay logic and credit belong to **Drk_Duck**
