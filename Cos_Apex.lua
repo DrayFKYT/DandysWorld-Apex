@@ -246,14 +246,6 @@ local Speeds = {
     AilmentPulse = 8
 }
 
--- Values restored to the game data when a speed toggle is turned off. The
--- input controls keep their configured numbers.
-local DEFAULT_SPEEDS = {
-    Walk = 16,
-    Sprint = 16,
-    Fly = 16
-}
-
 local EXPLOIT_FLY_MAX = 100000
 
 -- // The instant-menu drop is intentionally fixed. These values are no longer
@@ -695,12 +687,43 @@ local function SetAttributeOnChange(data, name, value)
     end
 end
 
--- Writes the default speed back to the character data. Used when a speed
--- toggle is switched off; the matching input box is left untouched.
-local function RestoreSpeedAttribute(attributeName, defaultValue)
+-- Writes the speed the current creature had before the toggle was enabled.
+-- Baselines are captured per character Data instance so a new creature's own
+-- values are used instead of a shared hardcoded default.
+local SpeedBaselines = setmetatable({}, { __mode = "k" })
+
+local function CaptureSpeedAttribute(data, attributeName)
+    if not data then
+        return
+    end
+    local baseline = SpeedBaselines[data]
+    if not baseline then
+        baseline = { Captured = {} }
+        SpeedBaselines[data] = baseline
+    end
+    if baseline.Captured[attributeName] then
+        return baseline[attributeName]
+    end
+    local ok, current = pcall(function()
+        return data:GetAttribute(attributeName)
+    end)
+    baseline.Captured[attributeName] = true
+    baseline[attributeName] = ok and current or nil
+    return baseline[attributeName]
+end
+
+local function RestoreSpeedAttribute(attributeName)
     local data = GetLocalCharacterData()
-    if data then
-        SetAttributeOnChange(data, attributeName, defaultValue)
+    if not data then
+        return
+    end
+    local baseline = SpeedBaselines[data]
+    if not baseline or not baseline.Captured[attributeName] then
+        return
+    end
+    local value = baseline[attributeName]
+    if value ~= nil then
+        SetAttributeOnChange(data, attributeName, value)
     end
 end
 
@@ -721,12 +744,15 @@ local function EnforceAttributes(data)
         SetAttributeOnChange(data, "Moisture", 999999999999)
     end
     if Toggles.WalkSpeed then
+        CaptureSpeedAttribute(data, "s")
         SetAttributeOnChange(data, "s", Speeds.Walk)
     end
     if Toggles.SprintSpeed then
+        CaptureSpeedAttribute(data, "ss")
         SetAttributeOnChange(data, "ss", Speeds.Sprint)
     end
     if Toggles.FlySpeed then
+        CaptureSpeedAttribute(data, "fs")
         SetAttributeOnChange(data, "fs", Speeds.Fly)
     end
 end
@@ -2463,8 +2489,11 @@ local function BuildUI()
             Toggles.WalkSpeed,
             Speeds.Walk,
             BindToggle("WalkSpeed", function(state)
-                if not state then
-                    RestoreSpeedAttribute("s", DEFAULT_SPEEDS.Walk)
+                local data = GetLocalCharacterData()
+                if state then
+                    CaptureSpeedAttribute(data, "s")
+                else
+                    RestoreSpeedAttribute("s")
                 end
             end),
             function(value)
@@ -2483,8 +2512,11 @@ local function BuildUI()
             Toggles.SprintSpeed,
             Speeds.Sprint,
             BindToggle("SprintSpeed", function(state)
-                if not state then
-                    RestoreSpeedAttribute("ss", DEFAULT_SPEEDS.Sprint)
+                local data = GetLocalCharacterData()
+                if state then
+                    CaptureSpeedAttribute(data, "ss")
+                else
+                    RestoreSpeedAttribute("ss")
                 end
             end),
             function(value)
@@ -2503,8 +2535,11 @@ local function BuildUI()
             Toggles.FlySpeed,
             Speeds.Fly,
             BindToggle("FlySpeed", function(state)
-                if not state then
-                    RestoreSpeedAttribute("fs", DEFAULT_SPEEDS.Fly)
+                local data = GetLocalCharacterData()
+                if state then
+                    CaptureSpeedAttribute(data, "fs")
+                else
+                    RestoreSpeedAttribute("fs")
                 end
             end),
             function(value)

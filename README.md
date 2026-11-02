@@ -41,7 +41,7 @@ The instant-menu drop timing is fixed at 1 second and 1,111,111 studs/second. `D
 
 Exploit Fly speed accepts values from `1` to `100000`.
 
-Turning `WALK_SWIM_SPEED`, `SPRINT_SPEED`, or `FLY_SPEED` off writes the default value (`16`) back to the matching `s` / `ss` / `fs` attribute. The input box keeps its configured number.
+Turning `WALK_SWIM_SPEED`, `SPRINT_SPEED`, or `FLY_SPEED` off restores the value the current creature had before the toggle was enabled. Baselines are tracked per creature, so changing species or respawning uses that creature's own values. The input box keeps its configured number.
 
 While `INFINITE_OXYGEN` is enabled the `BREATH` HUD bar is hidden; while `INFINITE_MOISTURE` is enabled the `MOISTURE` HUD bar is hidden. Both bars return to their normal state when the toggles are turned off or the script is cleaned up.
 
