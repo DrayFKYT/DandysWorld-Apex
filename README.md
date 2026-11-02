@@ -28,7 +28,7 @@ The `ANIMATION` tab adds a live animation swapper:
 
 - Search the full game catalog (477 species, 7,293 animation assets, 40 unique animation names)
 - Scope the search to the current creature or all creatures
-- Filter results with the `TYPE` dropdown (`ALL`, `MOVE`, `SWIM`, `POSE`, or `ACTION`)
+- Filter results with the `TYPE` dropdown: broad groups (`ALL`, `MOVE`, `SWIM`, `POSE`) plus each remaining animation type (`AGGRESSION`, `AMBUSH`, `BITE`, `COWER`, `DRINK`, `EAT`, `ENRAGED`, `HEADBUT`, `TAIL`)
 - Random preview button plus an `N` hotkey that cycles the filtered results
 - Preview current-creature animations through COS's own fake-state system
 - Preview foreign animations on the current rig through the creature `Animator`

@@ -1371,13 +1371,27 @@ local ANIMATION_CATALOG = {}
 local ANIMATION_SPECIES_COUNTS = {}
 local ANIMATION_CURRENT_SPECIES = nil
 local ANIMATION_CATALOG_READY = false
-local ANIMATION_CATEGORIES = { "ALL", "MOVE", "SWIM", "POSE", "ACTION" }
+local ANIMATION_BASE_CATEGORIES = { "ALL", "MOVE", "SWIM", "POSE" }
+local ANIMATION_CATEGORIES = { "ALL", "MOVE", "SWIM", "POSE" }
 local ANIMATION_CATEGORY_KEYWORDS = {
     SWIM = { "swim", "dive" },
     MOVE = { "walk", "run", "jump", "fly", "glide", "flap", "fall", "grab" },
     POSE = { "idle", "sit", "lay", "pose", "mud", "beach", "rest", "sleep" }
 }
 local ANIMATION_CATEGORY_ORDER = { "SWIM", "MOVE", "POSE" }
+
+-- Animations that do not match the broad groups are listed individually.
+-- Variants collapse to their base type so Bite, Bite2, and BiteLeft all filter
+-- as BITE, and EatUNUSED filters as EAT.
+local function GetSpecificAnimationCategory(animationName)
+    local name = string.lower(tostring(animationName or ""))
+    name = string.gsub(name, "%s*%(leave%)", "")
+    name = string.gsub(name, "unused$", "")
+    name = string.gsub(name, "%d+$", "")
+    name = string.gsub(name, "left$", "")
+    name = string.gsub(name, "right$", "")
+    return string.upper(name)
+end
 
 local function GetAnimationCategory(animationName)
     local lowerName = string.lower(tostring(animationName or ""))
@@ -1388,7 +1402,7 @@ local function GetAnimationCategory(animationName)
             end
         end
     end
-    return "ACTION"
+    return GetSpecificAnimationCategory(animationName)
 end
 
 local ANIMATION_PREVIEW = {
@@ -1503,6 +1517,7 @@ end
 local function BuildAnimationCatalog()
     local catalog = {}
     local counts = {}
+    local extraCategories = {}
     local root = GetAnimationCatalogRoot()
     if root then
         for _, speciesFolder in ipairs(root:GetChildren()) do
@@ -1511,13 +1526,17 @@ local function BuildAnimationCatalog()
                 if animation:IsA("Animation") then
                     local animationId = animation.AnimationId
                     if type(animationId) == "string" and animationId ~= "" then
+                        local category = GetAnimationCategory(animation.Name)
                         catalog[#catalog + 1] = {
                             Name = animation.Name,
                             Species = speciesName,
                             AnimationId = animationId,
-                            Category = GetAnimationCategory(animation.Name)
+                            Category = category
                         }
                         counts[speciesName] = (counts[speciesName] or 0) + 1
+                        if category ~= "SWIM" and category ~= "MOVE" and category ~= "POSE" then
+                            extraCategories[category] = true
+                        end
                     end
                 end
             end
@@ -1529,6 +1548,19 @@ local function BuildAnimationCatalog()
         end
         return a.Name < b.Name
     end)
+    local categories = {}
+    for _, category in ipairs(ANIMATION_BASE_CATEGORIES) do
+        categories[#categories + 1] = category
+    end
+    local sortedExtras = {}
+    for category in pairs(extraCategories) do
+        sortedExtras[#sortedExtras + 1] = category
+    end
+    table.sort(sortedExtras)
+    for _, category in ipairs(sortedExtras) do
+        categories[#categories + 1] = category
+    end
+    ANIMATION_CATEGORIES = categories
     ANIMATION_CATALOG = catalog
     ANIMATION_SPECIES_COUNTS = counts
     ANIMATION_CATALOG_READY = true
@@ -2707,6 +2739,7 @@ local function BuildUI()
         AnimationCards.Preview = tab:CreateInfoCard("PREVIEWING", "ORIGINAL")
 
         tab:CreateSectionLabel("ANIMATION SWAPPER")
+        BuildAnimationCatalog()
 
         local theme = ApexLibrary.Theme
         local card = Instance.new("Frame")
@@ -2821,14 +2854,18 @@ local function BuildUI()
         categoryDropdownStroke.Thickness = 1
         categoryDropdownStroke.Parent = categoryDropdown
 
-        local categoryMenu = Instance.new("Frame")
+        local categoryMenu = Instance.new("ScrollingFrame")
         categoryMenu.Name = "AnimationCategoryMenu"
-        categoryMenu.Size = UDim2.new(1, -32, 0, #ANIMATION_CATEGORIES * 24 + 10)
+        categoryMenu.Size = UDim2.new(1, -32, 0, math.min(#ANIMATION_CATEGORIES * 26 + 10, 200))
         categoryMenu.Position = UDim2.new(0, 16, 0, 142)
         categoryMenu.BackgroundColor3 = theme.Card
         categoryMenu.BorderSizePixel = 0
         categoryMenu.Visible = false
         categoryMenu.ZIndex = 20
+        categoryMenu.CanvasSize = UDim2.new(0, 0, 0, 0)
+        categoryMenu.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        categoryMenu.ScrollBarThickness = 2
+        categoryMenu.ScrollBarImageColor3 = theme.Border
         categoryMenu.Parent = card
         local categoryMenuStroke = Instance.new("UIStroke")
         categoryMenuStroke.Color = theme.Border
@@ -2850,7 +2887,7 @@ local function BuildUI()
         for index, category in ipairs(ANIMATION_CATEGORIES) do
             local button = Instance.new("TextButton")
             button.Name = "AnimationCategory_" .. category
-            button.Size = UDim2.new(1, 0, 0, 24)
+            button.Size = UDim2.new(1, -6, 0, 24)
             button.LayoutOrder = index
             button.BackgroundColor3 = theme.Input
             button.BorderSizePixel = 0
@@ -3079,7 +3116,6 @@ local function BuildUI()
             RenderAnimationResults()
         end))
 
-        BuildAnimationCatalog()
         RenderAnimationResults()
         UpdateAnimationStatus(true)
 
