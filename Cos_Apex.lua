@@ -1753,6 +1753,7 @@ local RagdollState = {
     Model = nil,
     Root = nil,
     Connection = nil,
+    SteppedConnection = nil,
     Joints = {},
     SavedParts = {},
     SavedMovers = nil,
@@ -1861,6 +1862,12 @@ local function StopRagdoll(silent)
             RagdollState.Connection:Disconnect()
         end)
         RagdollState.Connection = nil
+    end
+    if RagdollState.SteppedConnection then
+        pcall(function()
+            RagdollState.SteppedConnection:Disconnect()
+        end)
+        RagdollState.SteppedConnection = nil
     end
 
     local character = RagdollState.Character
@@ -2114,6 +2121,25 @@ local function StartRagdoll()
         end
         NeutralizeRagdollMovers(rig)
     end)
+
+    -- Stepped runs immediately before physics, so the movers stay neutral even
+    -- if the game rewrites them in a later Heartbeat handler.
+    if RunService.Stepped then
+        RagdollState.SteppedConnection = RunService.Stepped:Connect(function()
+            local rig = RagdollState.Character
+            local rigRoot = RagdollState.Root
+            if not rig or not rigRoot or not rigRoot.Parent then
+                return
+            end
+            rigRoot.Anchored = false
+            for _, motor in ipairs(RagdollState.Joints) do
+                if motor.Enabled then
+                    motor.Enabled = false
+                end
+            end
+            NeutralizeRagdollMovers(rig)
+        end)
+    end
 
     if SafeSetStatus then
         SafeSetStatus("RAGDOLL_ON")
