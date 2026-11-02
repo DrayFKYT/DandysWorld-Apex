@@ -650,32 +650,56 @@ local function GetLocalCharacterAndData()
     return character, GetClimberData()
 end
 
-local LastClimberData = nil
-local LastClimberState = nil
+-- The game may give a creature wall climb on spawn. Baselines keep that
+-- original value so turning the toggle off does not remove an innate ability.
+local ClimberBaselines = setmetatable({}, { __mode = "k" })
+
+local function ReadClimberAttribute(data)
+    local ok, value = pcall(function()
+        return data:GetAttribute("Climber")
+    end)
+    return ok and value == true or false
+end
+
+local function CaptureClimberBaseline(data)
+    if not data then
+        return false
+    end
+    local baseline = ClimberBaselines[data]
+    if baseline == nil then
+        baseline = ReadClimberAttribute(data)
+        ClimberBaselines[data] = baseline
+    end
+    return baseline
+end
+
+-- While the toggle is off, follow the game's own value so later changes are
+-- treated as the new baseline.
+local function RefreshClimberBaseline(data)
+    if data then
+        ClimberBaselines[data] = ReadClimberAttribute(data)
+    end
+end
 
 local function WriteClimberState(data, enabled)
     if not data then
         return
     end
-    if data ~= LastClimberData then
-        LastClimberData = data
-        LastClimberState = nil
-    end
-    if LastClimberState ~= enabled then
+    local ok, current = pcall(function()
+        return data:GetAttribute("Climber")
+    end)
+    if not ok or current ~= enabled then
         data:SetAttribute("Climber", enabled)
-        LastClimberState = enabled
     end
 end
 
-local function SetClimberState(enabled, force)
+local function SetClimberState(enabled)
     local data = GetClimberData()
     if not data then
         return
     end
-    if force then
-        LastClimberState = nil
-    end
-    WriteClimberState(data, enabled)
+    local baseline = CaptureClimberBaseline(data)
+    WriteClimberState(data, enabled == true or baseline)
 end
 
 local function SetAttributeOnChange(data, name, value)
@@ -762,7 +786,14 @@ local function EnforceClimber(data)
     if not data then
         return
     end
-    WriteClimberState(data, Toggles.AlwaysClimber)
+    if Toggles.AlwaysClimber then
+        CaptureClimberBaseline(data)
+        WriteClimberState(data, true)
+    else
+        -- Never force the attribute off here: creatures that spawn with wall
+        -- climb must keep it. Just follow the game's own value as baseline.
+        RefreshClimberBaseline(data)
+    end
 end
 
 -- // ESP
@@ -2188,7 +2219,7 @@ CleanupSession = function()
     end)
     pcall(RestoreOriginalAnimations)
     pcall(function()
-        SetClimberState(false, true)
+        SetClimberState(false)
     end)
     pcall(function()
         FireHideScent(false)
@@ -2607,7 +2638,7 @@ local function BuildUI()
             "Force the Climber attribute on your creature.",
             Toggles.AlwaysClimber,
             BindToggle("AlwaysClimber", function(state)
-                SetClimberState(state, true)
+                SetClimberState(state)
             end)
         )
 

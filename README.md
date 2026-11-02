@@ -43,6 +43,8 @@ Exploit Fly speed accepts values from `1` to `100000`.
 
 Turning `WALK_SWIM_SPEED`, `SPRINT_SPEED`, or `FLY_SPEED` off restores the value the current creature had before the toggle was enabled. Baselines are tracked per creature, so changing species or respawning uses that creature's own values. The input box keeps its configured number.
 
+`ALWAYS_WALL_CLIMBER` only forces the `Climber` attribute while it is enabled. Creatures that spawn with wall climb keep it when the toggle is off; creatures without it only climb while the toggle is on, and lose it again when turned off.
+
 While `INFINITE_OXYGEN` is enabled the `BREATH` HUD bar is hidden; while `INFINITE_MOISTURE` is enabled the `MOISTURE` HUD bar is hidden. Both bars return to their normal state when the toggles are turned off or the script is cleaned up.
 
 The `CONFIG` tab's `OPEN / CLOSE MENU` row is a keybind-only row: clicking the key chip rebinds it, the binding cannot be cleared, and it shows neither an `X` nor a toggle button.
