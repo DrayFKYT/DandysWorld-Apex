@@ -246,6 +246,14 @@ local Speeds = {
     AilmentPulse = 8
 }
 
+-- Values restored to the game data when a speed toggle is turned off. The
+-- input controls keep their configured numbers.
+local DEFAULT_SPEEDS = {
+    Walk = 16,
+    Sprint = 16,
+    Fly = 16
+}
+
 local EXPLOIT_FLY_MAX = 100000
 
 -- // The instant-menu drop is intentionally fixed. These values are no longer
@@ -684,6 +692,15 @@ local function SetAttributeOnChange(data, name, value)
     end)
     if not ok or current ~= value then
         data:SetAttribute(name, value)
+    end
+end
+
+-- Writes the default speed back to the character data. Used when a speed
+-- toggle is switched off; the matching input box is left untouched.
+local function RestoreSpeedAttribute(attributeName, defaultValue)
+    local data = GetLocalCharacterData()
+    if data then
+        SetAttributeOnChange(data, attributeName, defaultValue)
     end
 end
 
@@ -2445,7 +2462,11 @@ local function BuildUI()
             "Set the game's walk / swim speed attribute (s)",
             Toggles.WalkSpeed,
             Speeds.Walk,
-            BindToggle("WalkSpeed"),
+            BindToggle("WalkSpeed", function(state)
+                if not state then
+                    RestoreSpeedAttribute("s", DEFAULT_SPEEDS.Walk)
+                end
+            end),
             function(value)
                 Speeds.Walk = ClampNumber(value, 1, 5000, Speeds.Walk)
                 if walkControl then
@@ -2461,7 +2482,11 @@ local function BuildUI()
             "Set the game's sprint speed attribute (ss)",
             Toggles.SprintSpeed,
             Speeds.Sprint,
-            BindToggle("SprintSpeed"),
+            BindToggle("SprintSpeed", function(state)
+                if not state then
+                    RestoreSpeedAttribute("ss", DEFAULT_SPEEDS.Sprint)
+                end
+            end),
             function(value)
                 Speeds.Sprint = ClampNumber(value, 1, 5000, Speeds.Sprint)
                 if sprintControl then
@@ -2477,7 +2502,11 @@ local function BuildUI()
             "Set the game's flight speed attribute (fs)",
             Toggles.FlySpeed,
             Speeds.Fly,
-            BindToggle("FlySpeed"),
+            BindToggle("FlySpeed", function(state)
+                if not state then
+                    RestoreSpeedAttribute("fs", DEFAULT_SPEEDS.Fly)
+                end
+            end),
             function(value)
                 Speeds.Fly = ClampNumber(value, 1, 5000, Speeds.Fly)
                 if flyControl then
