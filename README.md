@@ -35,5 +35,6 @@ Autofarm safety runs away from the current attacker (or the combined direction o
 ## Notes
 
 - DEFAULT hide key: `RightControl`
-- Settings are saved as `ApexLibrary_Config.json`
+- APEX UI settings (accent color, hide key, mobile lock, and mobile button position) are shared across every script in `ApexLibrary_Config.json`
+- Dandy's own toggles and ESP colors are saved in `DandysWorld_Apex_Config.json`
 - `CONFIG` also contains the fixed `KILL SCRIPT & CLEANUP` button
