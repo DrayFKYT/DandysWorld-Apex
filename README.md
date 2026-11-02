@@ -9,7 +9,7 @@ Multi-script hub for two games, both using the **APEX_SYS V3.7 PLUS** terminal i
 Full APEX migration with movement, teleports, automation, player ESP, and cleanup.
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/DrayFKYT/DandysWorld-Apex/refs/heads/main/DandysWorld_Apex.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/DrayFKYT/DandysWorld-Apex/main/DandysWorld_Apex.lua"))()
 ```
 
 Tabs: `MAIN`, `VISUALS`, `TELEPORTS`, `AUTOMATION`, `PLAYERS`, `CONFIG`.
@@ -19,7 +19,7 @@ Tabs: `MAIN`, `VISUALS`, `TELEPORTS`, `AUTOMATION`, `PLAYERS`, `CONFIG`.
 APEX migration of **Drk_Duck's** original Cos menu. Every original feature is preserved: instant-menu drop, outline ESP, minimap ESP, wall climber, infinite stamina/oxygen/moisture, scent hide, aggro/cower, speed attributes, exploit fly, staff detection, and OOB remote removal.
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/DrayFKYT/DandysWorld-Apex/refs/heads/main/Cos_Apex.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/DrayFKYT/DandysWorld-Apex/main/Cos_Apex.lua"))()
 ```
 
 Tabs: `MAIN`, `MOVEMENT`, `SURVIVAL`, `ESP`, `ANIMATION`, `CONFIG`.
@@ -28,7 +28,7 @@ The `ANIMATION` tab adds a live animation swapper:
 
 - Search the full game catalog (477 species, 7,293 animation assets, 40 unique animation names)
 - Scope the search to the current creature or all creatures
-- Filter results by `ALL`, `MOVE`, `SWIM`, `POSE`, or `ACTION`
+- Filter results with the `TYPE` dropdown (`ALL`, `MOVE`, `SWIM`, `POSE`, or `ACTION`)
 - Random preview button plus an `N` hotkey that cycles the filtered results
 - Preview current-creature animations through COS's own fake-state system
 - Preview foreign animations on the current rig through the creature `Animator`

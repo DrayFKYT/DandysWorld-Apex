@@ -2803,13 +2803,55 @@ local function BuildUI()
         loopStroke.Thickness = 1
         loopStroke.Parent = loopButton
 
-        local UpdateCategoryButtons
+        local categoryDropdown = Instance.new("TextButton")
+        categoryDropdown.Name = "AnimationCategoryDropdown"
+        categoryDropdown.Size = UDim2.new(1, -32, 0, 24)
+        categoryDropdown.Position = UDim2.new(0, 16, 0, 116)
+        categoryDropdown.BackgroundColor3 = theme.Input
+        categoryDropdown.BorderSizePixel = 0
+        categoryDropdown.Font = Enum.Font.RobotoMono
+        categoryDropdown.Text = "TYPE: ALL"
+        categoryDropdown.TextColor3 = theme.Text
+        categoryDropdown.TextSize = 10
+        categoryDropdown.AutoButtonColor = false
+        categoryDropdown.ZIndex = 22
+        categoryDropdown.Parent = card
+        local categoryDropdownStroke = Instance.new("UIStroke")
+        categoryDropdownStroke.Color = theme.Border
+        categoryDropdownStroke.Thickness = 1
+        categoryDropdownStroke.Parent = categoryDropdown
+
+        local categoryMenu = Instance.new("Frame")
+        categoryMenu.Name = "AnimationCategoryMenu"
+        categoryMenu.Size = UDim2.new(1, -32, 0, #ANIMATION_CATEGORIES * 24 + 10)
+        categoryMenu.Position = UDim2.new(0, 16, 0, 142)
+        categoryMenu.BackgroundColor3 = theme.Card
+        categoryMenu.BorderSizePixel = 0
+        categoryMenu.Visible = false
+        categoryMenu.ZIndex = 20
+        categoryMenu.Parent = card
+        local categoryMenuStroke = Instance.new("UIStroke")
+        categoryMenuStroke.Color = theme.Border
+        categoryMenuStroke.Thickness = 1
+        categoryMenuStroke.Parent = categoryMenu
+        local categoryMenuPadding = Instance.new("UIPadding")
+        categoryMenuPadding.PaddingTop = UDim.new(0, 4)
+        categoryMenuPadding.PaddingLeft = UDim.new(0, 4)
+        categoryMenuPadding.PaddingRight = UDim.new(0, 4)
+        categoryMenuPadding.PaddingBottom = UDim.new(0, 4)
+        categoryMenuPadding.Parent = categoryMenu
+        local categoryMenuLayout = Instance.new("UIListLayout")
+        categoryMenuLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        categoryMenuLayout.Padding = UDim.new(0, 2)
+        categoryMenuLayout.Parent = categoryMenu
+
+        local UpdateCategoryDropdown
         local categoryButtons = {}
         for index, category in ipairs(ANIMATION_CATEGORIES) do
             local button = Instance.new("TextButton")
             button.Name = "AnimationCategory_" .. category
-            button.Size = UDim2.new(0, 60, 0, 22)
-            button.Position = UDim2.new(0, 16 + (index - 1) * 66, 0, 116)
+            button.Size = UDim2.new(1, 0, 0, 24)
+            button.LayoutOrder = index
             button.BackgroundColor3 = theme.Input
             button.BorderSizePixel = 0
             button.Font = Enum.Font.RobotoMono
@@ -2817,7 +2859,8 @@ local function BuildUI()
             button.TextColor3 = theme.Muted
             button.TextSize = 10
             button.AutoButtonColor = false
-            button.Parent = card
+            button.ZIndex = 21
+            button.Parent = categoryMenu
             local stroke = Instance.new("UIStroke")
             stroke.Color = theme.Border
             stroke.Thickness = 1
@@ -2825,15 +2868,23 @@ local function BuildUI()
             categoryButtons[category] = { Button = button, Stroke = stroke }
             button.Activated:Connect(function()
                 AnimationUI.Category = category
-                UpdateCategoryButtons()
+                categoryMenu.Visible = false
+                UpdateCategoryDropdown()
                 RenderAnimationResults()
                 SafeSetStatus("ANIM_FILTER_" .. category)
             end)
         end
         AnimationUI.CategoryButtons = categoryButtons
 
-        UpdateCategoryButtons = function()
+        categoryDropdown.Activated:Connect(function()
+            categoryMenu.Visible = not categoryMenu.Visible
+        end)
+
+        UpdateCategoryDropdown = function()
             local accent = GetAccentColor()
+            categoryDropdown.Text = "TYPE: " .. tostring(AnimationUI.Category)
+            categoryDropdown.TextColor3 = theme.Text
+            categoryDropdownStroke.Color = accent
             for category, entry in pairs(categoryButtons) do
                 local active = AnimationUI.Category == category
                 entry.Button.BackgroundColor3 = active and accent or theme.Input
@@ -2841,9 +2892,9 @@ local function BuildUI()
                 entry.Stroke.Color = active and accent or theme.Border
             end
         end
-        UpdateCategoryButtons()
+        UpdateCategoryDropdown()
         MyWindow:RegisterAccentListener(function()
-            UpdateCategoryButtons()
+            UpdateCategoryDropdown()
         end)
 
         local randomButton = Instance.new("TextButton")
