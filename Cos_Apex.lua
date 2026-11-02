@@ -2985,6 +2985,14 @@ local function BuildUI()
         AnimationUI.LoopButton = loopButton
         AnimationUI.Refresh = RenderAnimationResults
 
+        -- Result rows are rebuilt on every render, so they cannot hold their
+        -- own accent listener. Re-render the list when the accent changes.
+        if MyWindow and MyWindow.RegisterAccentListener then
+            MyWindow:RegisterAccentListener(function()
+                RenderAnimationResults()
+            end)
+        end
+
         local function UpdateLoopButton()
             loopButton.Text = "LOOP PREVIEW: " .. (Toggles.AnimationLoop and "ON" or "OFF")
         end
