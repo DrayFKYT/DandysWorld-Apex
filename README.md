@@ -29,13 +29,15 @@ The `ANIMATION` tab adds a live animation swapper:
 - Search the full game catalog (477 species, 7,293 animation assets, 40 unique animation names)
 - Scope the search to the current creature or all creatures
 - Filter results with the `TYPE` dropdown: broad groups (`ALL`, `MOVE`, `SWIM`, `POSE`) plus each remaining animation type (`AGGRESSION`, `AMBUSH`, `BITE`, `COWER`, `DRINK`, `EAT`, `ENRAGED`, `HEADBUT`, `TAIL`)
-- Random preview button plus an `N` hotkey that cycles the filtered results
+- Random and `NEXT PREVIEW` buttons that cycle the filtered results (the old `N` hotkey was removed)
 - Preview current-creature animations through COS's own fake-state system
 - Preview foreign animations on the current rig through the creature `Animator`
 - Loop toggle, reset to the current creature's original animation, and catalog refresh
 - Automatic preview cleanup on species change, respawn, or script unload
+- `CREATURE ANIMATION PACK` browser: search the full animation library by creature, select a pack, and apply its complete Idle, Walk, Run, Swim, and action set to the current rig until `RESET`
+- The pack status line reports the selected creature, track count, and the animations currently playing on your creature; the swap is reasserted if the game controller replaces the track table
 
-The same tab has `RAGDOLL` and `UNRAGDOLL` action rows. Ragdoll freezes the creature's current animation pose, pins it in place, and tumbles the whole rigid model the same way the server ragdoll does; unragdoll restores the animation speeds, stands it upright, and returns control. Both rows have optional programmable keybinds, defaulting to `R` and `U`; press the adjacent `X` to clear a binding to `NONE`.
+The same tab has `RAGDOLL` and `UNRAGDOLL` action rows. Ragdoll switches the creature to its idle pose, freezes that pose, detaches the game's movement forces, enables collisions, and lets gravity and momentum roll the unanchored body with real physics; control stays disabled until you unragdoll. Unragdoll stands the creature back up at the spot where it rolled to, restores its collisions and animations, reattaches the movement forces, and returns control. Both rows have optional programmable keybinds, defaulting to `R` and `U`; press the adjacent `X` to clear a binding to `NONE`.
 
 The instant-menu drop timing is fixed at 1 second and 1,111,111 studs/second. `DROP_DURATION` and `DROP_SPEED` are no longer editable controls and are not read from the config file.
 
@@ -57,7 +59,7 @@ The interface is provided by [Apex-Gui-library](https://github.com/DrayFKYT/Apex
 https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/main/ApexLibraryPlus.lua
 ```
 
-Both scripts download revision 12 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 12 adds the header `FULL` / `EXIT` toggle, which expands the window and tab content to fill the screen with only modest text growth; the mobile claw toggle stays layered above it. Revision 11 added `Tab:CreateKeybindButton` rows with optional action buttons and clear buttons; `ShowAction = false` leaves a keybind-only row.
+Both scripts download revision 12 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 12 adds the animated header fullscreen glyph, which expands the window and tab content to a centered 50% panel with only modest text growth; the mobile claw toggle stays layered above it. Revision 11 added `Tab:CreateKeybindButton` rows with optional action buttons and clear buttons; `ShowAction = false` leaves a keybind-only row.
 
 ## Documentation
 

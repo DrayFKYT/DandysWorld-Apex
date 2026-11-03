@@ -181,6 +181,7 @@ local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
 local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerName = LocalPlayer.Name
@@ -1443,6 +1444,8 @@ end
 local ANIMATION_MAX_RESULTS = 40
 local ANIMATION_CATALOG = {}
 local ANIMATION_SPECIES_COUNTS = {}
+local ANIMATION_PACKS = {}
+local ANIMATION_PACK_SPECIES = {}
 local ANIMATION_CURRENT_SPECIES = nil
 local ANIMATION_CATALOG_READY = false
 local ANIMATION_BASE_CATEGORIES = { "ALL", "MOVE", "SWIM", "POSE" }
@@ -1591,11 +1594,13 @@ end
 local function BuildAnimationCatalog()
     local catalog = {}
     local counts = {}
+    local packs = {}
     local extraCategories = {}
     local root = GetAnimationCatalogRoot()
     if root then
         for _, speciesFolder in ipairs(root:GetChildren()) do
             local speciesName = speciesFolder.Name
+            local pack = {}
             for _, animation in ipairs(speciesFolder:GetDescendants()) do
                 if animation:IsA("Animation") then
                     local animationId = animation.AnimationId
@@ -1607,12 +1612,19 @@ local function BuildAnimationCatalog()
                             AnimationId = animationId,
                             Category = category
                         }
+                        pack[#pack + 1] = {
+                            Name = animation.Name,
+                            AnimationId = animationId
+                        }
                         counts[speciesName] = (counts[speciesName] or 0) + 1
                         if category ~= "SWIM" and category ~= "MOVE" and category ~= "POSE" then
                             extraCategories[category] = true
                         end
                     end
                 end
+            end
+            if #pack > 0 then
+                packs[speciesName] = pack
             end
         end
     end
@@ -1634,9 +1646,17 @@ local function BuildAnimationCatalog()
     for _, category in ipairs(sortedExtras) do
         categories[#categories + 1] = category
     end
+    local packSpecies = {}
+    for speciesName in pairs(packs) do
+        packSpecies[#packSpecies + 1] = speciesName
+    end
+    table.sort(packSpecies)
+
     ANIMATION_CATEGORIES = categories
     ANIMATION_CATALOG = catalog
     ANIMATION_SPECIES_COUNTS = counts
+    ANIMATION_PACKS = packs
+    ANIMATION_PACK_SPECIES = packSpecies
     ANIMATION_CATALOG_READY = true
     local character = GetCosCharacter()
     ANIMATION_CURRENT_SPECIES = character and character.Species or nil
@@ -1677,6 +1697,406 @@ local function ClearFakeAnimationState(character)
     end
 end
 
+-- // Creature animation pack replacement --------------------------------
+-- Loads a complete animation pack from the game's animation library (for
+-- example Kora's Idle/Walk/Run/Swim tracks) onto the current rig. The game
+-- controller keeps driving its normal state machine, but every state now
+-- resolves to the selected creature's animation. The mapping stays installed
+-- until RESET, and the status line reports the live local tracks.
+local ANIMATION_PACK_FALLBACKS = {
+    Idle = { "Idle" },
+    Walk = { "Walk", "Run" },
+    Run = { "Run", "Walk" },
+    Swim = { "Swim", "Walk" },
+    SwimFast = { "SwimFast", "Swim", "Run" },
+    SwimIdle = { "SwimIdle", "Swim", "Idle" },
+    Jump = { "Jump", "Run", "Fall" },
+    Fall = { "Fall", "Jump", "Idle" },
+    FlyIdle = { "FlyIdle", "Glide", "Idle" },
+    FlyForward = { "FlyForward", "Glide", "Run" },
+    Glide = { "Glide", "FlyIdle", "FlyForward" },
+    Flap = { "Flap", "Glide", "FlyIdle" },
+    Dive = { "Dive", "Swim" },
+    Ambush = { "Ambush", "Run" },
+    Aggression = { "Aggression", "Cower", "Idle" },
+    Cower = { "Cower", "Idle" },
+    Lay = { "Lay", "Sit", "Idle" },
+    Sit = { "Sit", "Lay", "Idle" },
+    Mud = { "Mud", "Lay", "Idle" },
+    Eat = { "Eat", "Drink", "Bite" },
+    Drink = { "Drink", "Eat", "Bite" },
+    Bite = { "Bite", "BiteLeft", "BiteRight", "Eat" }
+}
+
+local ANIMATION_SWAP = {
+    Active = false,
+    TargetSpecies = nil,
+    TargetCount = 0,
+    Character = nil,
+    Root = nil,
+    Tracks = {},
+    Originals = {},
+    AddedNames = {},
+    UI = {},
+    LastStatus = 0,
+    LastStatusText = nil
+}
+
+local function BuildAnimationPackMap(species)
+    local pack = species and ANIMATION_PACKS[species]
+    if not pack then
+        return nil
+    end
+    local map = {}
+    for _, entry in ipairs(pack) do
+        if not map[entry.Name] then
+            map[entry.Name] = entry
+        end
+    end
+    return map
+end
+
+local function ResolveAnimationPackTrack(stateName, map)
+    local exact = map[stateName]
+    if exact then
+        return exact
+    end
+    local fallbacks = ANIMATION_PACK_FALLBACKS[stateName]
+    if fallbacks then
+        for _, name in ipairs(fallbacks) do
+            if map[name] then
+                return map[name]
+            end
+        end
+    end
+    return nil
+end
+
+function ANIMATION_SWAP.GetTargetCount()
+    return ANIMATION_SWAP.TargetSpecies and #(ANIMATION_PACKS[ANIMATION_SWAP.TargetSpecies] or {}) or 0
+end
+
+function ANIMATION_SWAP.GetPlayingNames(character)
+    local names = {}
+    for name, track in pairs((character and character.AnimationTracks) or {}) do
+        local playing = false
+        pcall(function()
+            playing = track and track.IsPlaying
+        end)
+        if playing then
+            names[#names + 1] = tostring(name)
+        end
+    end
+    table.sort(names)
+    return names
+end
+
+function ANIMATION_SWAP.UpdateTargetUI()
+    local selected = ANIMATION_SWAP.UI.SelectedLabel
+    if selected then
+        local species = ANIMATION_SWAP.TargetSpecies
+        if species then
+            selected.Text = "PACK: " .. tostring(species)
+                .. " · " .. tostring(ANIMATION_SWAP.GetTargetCount()) .. " TRACKS"
+        else
+            selected.Text = "PACK: NONE SELECTED"
+        end
+    end
+    if ANIMATION_SWAP.RefreshList then
+        ANIMATION_SWAP.RefreshList()
+    end
+end
+
+function ANIMATION_SWAP.SelectTarget(species)
+    if not ANIMATION_PACKS[species] then
+        return false
+    end
+    ANIMATION_SWAP.TargetSpecies = species
+    ANIMATION_SWAP.UpdateTargetUI()
+    ANIMATION_SWAP.UpdateStatus(true)
+    SafeSetStatus("ANIMATION_PACK_TARGET")
+    return true
+end
+
+function ANIMATION_SWAP.UpdateStatus(force)
+    local now = os.clock()
+    if not force and now - (ANIMATION_SWAP.LastStatus or 0) < 0.35 then
+        return
+    end
+    ANIMATION_SWAP.LastStatus = now
+
+    local label = ANIMATION_SWAP.UI.StatusLabel
+    if not label then
+        return
+    end
+
+    local character = ANIMATION_SWAP.Active and ANIMATION_SWAP.Character or GetCosCharacter()
+    local playing = ANIMATION_SWAP.GetPlayingNames(character)
+    local playingText = #playing > 0
+        and table.concat(playing, " · ", 1, math.min(#playing, 5))
+        or "—"
+
+    local text
+    if ANIMATION_SWAP.Active then
+        text = "PACK (" .. tostring(ANIMATION_SWAP.TargetSpecies or "?") .. ")"
+            .. " · " .. tostring(ANIMATION_SWAP.TargetCount) .. " TRACKS"
+            .. "\nPLAYING: " .. playingText
+    elseif ANIMATION_SWAP.TargetSpecies then
+        text = "SELECTED: " .. tostring(ANIMATION_SWAP.TargetSpecies)
+            .. " · " .. tostring(ANIMATION_SWAP.GetTargetCount()) .. " TRACKS"
+            .. "\nPLAYING: " .. playingText
+    else
+        text = "PLAYING: " .. playingText
+            .. "\nSELECT A CREATURE PACK ABOVE"
+    end
+
+    if text ~= ANIMATION_SWAP.LastStatusText then
+        ANIMATION_SWAP.LastStatusText = text
+        label.Text = text
+    end
+end
+
+local ANIMATION_PACK_LOOPED = {
+    Idle = true,
+    Walk = true,
+    Run = true,
+    Swim = true,
+    SwimFast = true,
+    SwimIdle = true,
+    FlyIdle = true,
+    FlyForward = true,
+    Glide = true,
+    Jump = true,
+    Fall = true,
+    Ambush = true
+}
+
+local function IsLoopedPackState(stateName)
+    return ANIMATION_PACK_LOOPED[stateName] == true
+end
+
+function ANIMATION_SWAP.Stop(silent)
+    local character = ANIMATION_SWAP.Character
+    local wasActive = ANIMATION_SWAP.Active
+
+    for _, entry in ipairs(ANIMATION_SWAP.Tracks or {}) do
+        pcall(function()
+            entry.Track:Stop(0)
+        end)
+        pcall(function()
+            entry.Track:Destroy()
+        end)
+        pcall(function()
+            entry.Animation:Destroy()
+        end)
+    end
+
+    if character and character.AnimationTracks then
+        for name, original in pairs(ANIMATION_SWAP.Originals or {}) do
+            if original then
+                character.AnimationTracks[name] = original
+            end
+        end
+        for _, name in ipairs(ANIMATION_SWAP.AddedNames or {}) do
+            if not (ANIMATION_SWAP.Originals or {})[name] then
+                character.AnimationTracks[name] = nil
+            end
+        end
+    end
+
+    if wasActive and character and character.Root and character.Root.Parent then
+        pcall(function()
+            character.IgnoreStateTransitions = false
+            if character.SetState then
+                character:SetState(character.State or "Idle")
+            end
+        end)
+    end
+
+    ANIMATION_SWAP.Active = false
+    ANIMATION_SWAP.Character = nil
+    ANIMATION_SWAP.Root = nil
+    ANIMATION_SWAP.Tracks = {}
+    ANIMATION_SWAP.Originals = {}
+    ANIMATION_SWAP.AddedNames = {}
+    ANIMATION_SWAP.TargetCount = 0
+    ANIMATION_SWAP.LastStatusText = nil
+
+    if not silent then
+        UpdateAnimationStatus(true)
+        ANIMATION_SWAP.UpdateStatus(true)
+    end
+end
+
+function ANIMATION_SWAP.Start()
+    if not ANIMATION_CATALOG_READY then
+        BuildAnimationCatalog()
+    end
+
+    local species = ANIMATION_SWAP.TargetSpecies
+    local pack = species and ANIMATION_PACKS[species]
+    if not pack then
+        SafeSetStatus("ANIMATION_PACK_NO_TARGET")
+        ANIMATION_SWAP.UpdateStatus(true)
+        return false
+    end
+
+    local character = GetCosCharacter()
+    local root = character and character.Root
+    if not character or not root or not root.Parent then
+        SafeSetStatus("ANIMATION_PACK_NO_CREATURE")
+        return false
+    end
+
+    StopForeignPreview()
+    ANIMATION_PREVIEW.Active = false
+    ANIMATION_PREVIEW.Name = nil
+    ANIMATION_PREVIEW.Species = nil
+    ANIMATION_PREVIEW.Foreign = false
+    ANIMATION_SWAP.Stop(true)
+    pcall(function()
+        ClearFakeAnimationState(character)
+    end)
+
+    local animator = GetCosAnimator(character)
+    local tracks = character.AnimationTracks
+    if not animator or type(tracks) ~= "table" then
+        SafeSetStatus("ANIMATION_PACK_FAILED")
+        return false
+    end
+
+    local map = BuildAnimationPackMap(species)
+    if not map then
+        SafeSetStatus("ANIMATION_PACK_FAILED")
+        return false
+    end
+
+    local originals = {}
+    for name, track in pairs(tracks) do
+        originals[name] = track
+        pcall(function()
+            if track and track.IsPlaying then
+                track:Stop(0)
+            end
+        end)
+    end
+
+    local parent = character.AnimationController or root
+    local entries = {}
+    local addedNames = {}
+
+    local function InstallTrack(stateName, source, original)
+        local animation = Instance.new("Animation")
+        animation.Name = "CosApexPack_" .. tostring(stateName)
+        animation.AnimationId = source.AnimationId
+        animation.Parent = parent
+
+        local ok, track = pcall(function()
+            return animator:LoadAnimation(animation)
+        end)
+        if not ok or not track then
+            pcall(function()
+                animation:Destroy()
+            end)
+            return false
+        end
+
+        local looped = IsLoopedPackState(stateName)
+        if original then
+            looped = original.Looped == true
+        end
+        pcall(function()
+            track.Looped = looped
+        end)
+        if original and original.Priority then
+            pcall(function()
+                track.Priority = original.Priority
+            end)
+        end
+
+        tracks[stateName] = track
+        entries[#entries + 1] = {
+            Name = stateName,
+            Track = track,
+            Animation = animation,
+            Original = original
+        }
+        return true
+    end
+
+    for stateName, original in pairs(originals) do
+        local source = ResolveAnimationPackTrack(stateName, map)
+        if source then
+            InstallTrack(stateName, source, original)
+        end
+    end
+
+    -- Target-only states (for example fly or tail tracks the local species
+    -- never loaded) are installed too, so the pack is complete.
+    for stateName, source in pairs(map) do
+        if not originals[stateName] then
+            if InstallTrack(stateName, source, nil) then
+                addedNames[#addedNames + 1] = stateName
+            end
+        end
+    end
+
+    if #entries == 0 then
+        for name, original in pairs(originals) do
+            if original then
+                tracks[name] = original
+            end
+        end
+        pcall(function()
+            character:SetState(character.State or "Idle")
+        end)
+        SafeSetStatus("ANIMATION_PACK_FAILED")
+        return false
+    end
+
+    ANIMATION_SWAP.Character = character
+    ANIMATION_SWAP.Root = root
+    ANIMATION_SWAP.Tracks = entries
+    ANIMATION_SWAP.Originals = originals
+    ANIMATION_SWAP.AddedNames = addedNames
+    ANIMATION_SWAP.TargetCount = #pack
+    ANIMATION_SWAP.Active = true
+
+    pcall(function()
+        character.IgnoreStateTransitions = false
+        if character.SetState then
+            character:SetState(character.State or "Idle")
+        end
+    end)
+
+    UpdateAnimationStatus(true)
+    ANIMATION_SWAP.UpdateTargetUI()
+    ANIMATION_SWAP.UpdateStatus(true)
+    SafeSetStatus("ANIMATION_PACK_ON")
+    return true
+end
+
+function ANIMATION_SWAP.Enforce()
+    if not ANIMATION_SWAP.Active then
+        return
+    end
+    local character = ANIMATION_SWAP.Character
+    local current = GetCosCharacter()
+    if not character or character ~= current or not character.Root or not character.Root.Parent then
+        ANIMATION_SWAP.Stop(true)
+        return
+    end
+    local tracks = character.AnimationTracks
+    if type(tracks) ~= "table" then
+        return
+    end
+    for _, entry in ipairs(ANIMATION_SWAP.Tracks) do
+        if entry.Track then
+            tracks[entry.Name] = entry.Track
+        end
+    end
+end
+
 local function SetAnimationCard(card, key, value)
     if not card then
         return
@@ -1700,6 +2120,9 @@ UpdateAnimationStatus = function(force)
     local species = character and character.Species or nil
     if species ~= ANIMATION_CURRENT_SPECIES then
         ANIMATION_CURRENT_SPECIES = species
+        if ANIMATION_SWAP.Active then
+            ANIMATION_SWAP.Stop(true)
+        end
         if ANIMATION_PREVIEW.Active then
             StopForeignPreview()
             ClearFakeAnimationState(character)
@@ -1718,7 +2141,9 @@ UpdateAnimationStatus = function(force)
     SetAnimationCard(AnimationCards.Tracks, "Tracks", tostring(CountAnimationTracks(character)))
 
     local previewText = "ORIGINAL"
-    if ANIMATION_PREVIEW.Active then
+    if ANIMATION_SWAP.Active then
+        previewText = "PACK · " .. tostring(ANIMATION_SWAP.TargetSpecies)
+    elseif ANIMATION_PREVIEW.Active then
         previewText = tostring(ANIMATION_PREVIEW.Name) .. " · " .. tostring(ANIMATION_PREVIEW.Species)
         if ANIMATION_PREVIEW.Foreign then
             previewText = previewText .. " (FOREIGN)"
@@ -1728,6 +2153,7 @@ UpdateAnimationStatus = function(force)
 end
 
 local function RestoreOriginalAnimations()
+    ANIMATION_SWAP.Stop(true)
     StopForeignPreview()
     local character = GetCosCharacter()
     if character then
@@ -1738,14 +2164,34 @@ local function RestoreOriginalAnimations()
     ANIMATION_PREVIEW.Species = nil
     ANIMATION_PREVIEW.Foreign = false
     UpdateAnimationStatus(true)
+    ANIMATION_SWAP.UpdateStatus(true)
 end
 
 -- // Ragdoll -----------------------------------------------------------
--- Mirrors the server ragdoll: the character's animations freeze in their
--- current pose and the whole rigid model rolls like a statue. The root is
--- pinned in place, so the creature tumbles where it was instead of sliding.
--- UNRAGDOLL restores the animation speeds and stands the creature back up.
-local RAGDOLL_SPIN_SPEED = 3
+-- The creature switches to its idle pose and holds that pose rigidly, but the
+-- whole model becomes a real physics body. The game's movers are detached so
+-- it cannot drive the character, collisions are enabled on the visible parts,
+-- and the root is left unanchored so gravity and momentum can roll the body
+-- around the map. Nothing rotates the model by hand. UNRAGDOLL restores the
+-- movers, collisions, and animations, then stands the creature back up.
+local RAGDOLL_COLLISION_TRANSPARENCY = 0.9
+local RAGDOLL_TOPPLE_SPEED = 2.5
+local RAGDOLL_MAX_MOMENTUM = 90
+
+local RAGDOLL_MOVER_CLASSES = {
+    BodyGyro = true,
+    BodyVelocity = true,
+    BodyForce = true,
+    BodyPosition = true,
+    BodyAngularVelocity = true,
+    BodyThrust = true,
+    LinearVelocity = true,
+    AngularVelocity = true,
+    VectorForce = true,
+    Torque = true,
+    AlignPosition = true,
+    AlignOrientation = true
+}
 
 local RagdollState = {
     Active = false,
@@ -1753,9 +2199,24 @@ local RagdollState = {
     Root = nil,
     Connection = nil,
     SavedMovers = nil,
+    SavedParts = nil,
     SavedRootAnchored = false,
+    SavedRootMassless = nil,
+    SavedRootCanCollide = nil,
     SavedCFrame = nil,
-    SavedTracks = {}
+    SavedState = nil,
+    SavedStandOffset = 2,
+    SavedTracks = {},
+    DefaultGyroTorque = Vector3.new(9000000000, 9000000000, 9000000000),
+    MoverProperties = {
+        "MaxTorque",
+        "MaxForce",
+        "Force",
+        "Enabled",
+        "P",
+        "D",
+        "MaxVelocity"
+    }
 }
 
 local function NeutralizeRagdollMovers(character)
@@ -1782,6 +2243,186 @@ local function NeutralizeRagdollMovers(character)
     if character.LinearVelocity then
         pcall(function()
             character.LinearVelocity.Enabled = false
+        end)
+    end
+end
+
+local function GetRagdollMovers(character, model)
+    local movers = {}
+    local seen = {}
+    local function add(mover)
+        if mover and not seen[mover] then
+            seen[mover] = true
+            movers[#movers + 1] = mover
+        end
+    end
+
+    if character then
+        add(character.BodyGyro)
+        add(character.BodyVelocity)
+        add(character.BodyForce)
+        add(character.BodyPosition)
+        add(character.LinearVelocity)
+        add(character.BodyAngularVelocity)
+    end
+    if model then
+        for _, descendant in ipairs(model:GetDescendants()) do
+            if RAGDOLL_MOVER_CLASSES[descendant.ClassName] then
+                add(descendant)
+            end
+        end
+    end
+    return movers
+end
+
+-- Properties are not enough: the character controller rewrites MaxForce and
+-- Enabled every frame. Detaching the movers makes the game's writes harmless
+-- while ragdolled, and reattaching them restores normal movement afterward.
+-- The setup-time properties (BodyGyro.MaxTorque in particular) are NOT
+-- rewritten by the controller, so they must be captured and restored too.
+function RagdollState.CaptureMoverProperties(mover)
+    local props = {}
+    for _, prop in ipairs(RagdollState.MoverProperties) do
+        local ok, value = pcall(function()
+            return mover[prop]
+        end)
+        if ok and value ~= nil then
+            props[prop] = value
+        end
+    end
+    return props
+end
+
+function RagdollState.ApplyMoverProperties(mover, props)
+    for prop, value in pairs(props or {}) do
+        pcall(function()
+            mover[prop] = value
+        end)
+    end
+end
+
+local function DetachRagdollMovers(character, model)
+    local saved = {}
+    for _, mover in ipairs(GetRagdollMovers(character, model)) do
+        saved[#saved + 1] = {
+            Mover = mover,
+            Parent = mover.Parent,
+            Properties = RagdollState.CaptureMoverProperties(mover)
+        }
+        pcall(function()
+            mover.Parent = nil
+        end)
+    end
+    RagdollState.SavedMovers = saved
+end
+
+local function RestoreRagdollMovers()
+    local saved = RagdollState.SavedMovers
+    RagdollState.SavedMovers = nil
+    for _, entry in ipairs(saved or {}) do
+        local mover = entry.Mover
+        if mover and entry.Parent then
+            pcall(function()
+                mover.Parent = entry.Parent
+            end)
+            RagdollState.ApplyMoverProperties(mover, entry.Properties)
+            -- A zero torque gyro is the usual stale-ragdoll symptom: walking
+            -- works through BodyVelocity but the body keeps tumbling because
+            -- nothing uprights it. Fall back to the game's default torque.
+            if mover.ClassName == "BodyGyro" then
+                local ok, torque = pcall(function()
+                    return mover.MaxTorque
+                end)
+                if ok and torque and torque.Magnitude < 1 then
+                    pcall(function()
+                        mover.MaxTorque = RagdollState.DefaultGyroTorque
+                    end)
+                end
+            end
+        end
+    end
+end
+
+local function PrepareRagdollParts(character, root)
+    local model = root and root.Parent
+    local saved = {}
+    local lowestY = root and root.Position.Y or 0
+    local visibleParts = 0
+
+    if model then
+        for _, part in ipairs(model:GetDescendants()) do
+            if part:IsA("BasePart") and part.Transparency < RAGDOLL_COLLISION_TRANSPARENCY then
+                local bottom = part.Position.Y - part.Size.Y * 0.5
+                if bottom < lowestY then
+                    lowestY = bottom
+                end
+                saved[#saved + 1] = { Part = part, CanCollide = part.CanCollide }
+                visibleParts = visibleParts + 1
+                pcall(function()
+                    part.CanCollide = true
+                end)
+            end
+        end
+    end
+
+    RagdollState.SavedParts = saved
+    RagdollState.SavedStandOffset = root and math.max(root.Position.Y - lowestY, 2) or 2
+
+    if root then
+        RagdollState.SavedRootMassless = root.Massless
+        if root.Massless then
+            pcall(function()
+                root.Massless = false
+            end)
+        end
+        if visibleParts == 0 then
+            RagdollState.SavedRootCanCollide = root.CanCollide
+            pcall(function()
+                root.CanCollide = true
+            end)
+        end
+    end
+end
+
+local function RestoreRagdollParts()
+    local saved = RagdollState.SavedParts
+    RagdollState.SavedParts = nil
+    for _, entry in ipairs(saved or {}) do
+        local part = entry.Part
+        if part and part.Parent then
+            pcall(function()
+                part.CanCollide = entry.CanCollide
+            end)
+        end
+    end
+
+    local root = RagdollState.Root
+    if root and root.Parent then
+        if RagdollState.SavedRootMassless ~= nil then
+            pcall(function()
+                root.Massless = RagdollState.SavedRootMassless
+            end)
+        end
+        if RagdollState.SavedRootCanCollide ~= nil then
+            pcall(function()
+                root.CanCollide = RagdollState.SavedRootCanCollide
+            end)
+        end
+    end
+    RagdollState.SavedRootMassless = nil
+    RagdollState.SavedRootCanCollide = nil
+end
+
+local function EnterRagdollIdle(character)
+    if not character then
+        return
+    end
+    local ok = pcall(function()
+        character:SetFakeState("Idle")
+    end)
+    if not ok then
+        pcall(function()
+            character:SetState("Idle")
         end)
     end
 end
@@ -1839,8 +2480,99 @@ local function RestoreRagdollAnimations()
     end
 end
 
+function RagdollState.RecoverDetachedMovers()
+    local character = GetCosCharacter()
+    local root = character and character.Root
+    if not character or not root or not root.Parent then
+        return false
+    end
+
+    local recovered = false
+    for _, name in ipairs({
+        "BodyGyro",
+        "BodyVelocity",
+        "BodyForce",
+        "BodyPosition",
+        "LinearVelocity",
+        "BodyAngularVelocity"
+    }) do
+        local ok, mover = pcall(function()
+            return character[name]
+        end)
+        if ok and mover and mover.Parent == nil then
+            local reparented = pcall(function()
+                mover.Parent = root
+            end)
+            if reparented then
+                recovered = true
+            end
+        end
+    end
+
+    if character.BodyGyro then
+        local ok, torque = pcall(function()
+            return character.BodyGyro.MaxTorque
+        end)
+        if ok and torque and torque.Magnitude < 1 then
+            pcall(function()
+                character.BodyGyro.MaxTorque = RagdollState.DefaultGyroTorque
+            end)
+            recovered = true
+        end
+    end
+
+    if not recovered then
+        return false
+    end
+
+    -- A lost ragdoll leaves collisions enabled and the body unanchored. Put
+    -- the visible parts back to the game's normal non-colliding state, stand
+    -- the creature upright, and resume its animation state machine.
+    local model = root.Parent
+    if model then
+        for _, part in ipairs(model:GetDescendants()) do
+            if part:IsA("BasePart") and part ~= root and part.Transparency < RAGDOLL_COLLISION_TRANSPARENCY then
+                pcall(function()
+                    part.CanCollide = false
+                end)
+            end
+        end
+    end
+
+    pcall(function()
+        local _, yaw = root.CFrame:ToOrientation()
+        root.Anchored = false
+        root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        if character.BodyGyro then
+            character.BodyGyro.CFrame = root.CFrame
+            character.BodyGyro.MaxTorque = RagdollState.DefaultGyroTorque
+        end
+        if character.BodyVelocity then
+            character.BodyVelocity.Velocity = Vector3.new(0, 0, 0)
+        end
+        character.IgnoreStateTransitions = false
+        if character.ClearFakeState then
+            character:ClearFakeState()
+        elseif character.SetState then
+            character:SetState(character.State or "Idle")
+        end
+    end)
+
+    return true
+end
+
 local function StopRagdoll(silent)
     if not RagdollState.Active then
+        -- Recover from a stale ragdoll (script reload, lost state, or a
+        -- previous unragdoll that only reattached the movers). Otherwise the
+        -- creature keeps the ragdoll collisions and a zero-torque gyro, which
+        -- lets it walk while still tumbling.
+        local recovered = RagdollState.RecoverDetachedMovers()
+        if recovered and not silent and SafeSetStatus then
+            SafeSetStatus("RAGDOLL_OFF")
+        end
         return
     end
     RagdollState.Active = false
@@ -1854,43 +2586,25 @@ local function StopRagdoll(silent)
 
     local character = RagdollState.Character
     local root = RagdollState.Root
+    local savedAnchored = RagdollState.SavedRootAnchored
+
+    -- Pin the model while it is repositioned so the game's movers cannot drag
+    -- it away mid-restore.
+    if root and root.Parent then
+        pcall(function()
+            root.Anchored = true
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end)
+    end
 
     RestoreRagdollAnimations()
 
-    local movers = RagdollState.SavedMovers
-    if movers and character then
-        if character.BodyGyro then
-            pcall(function()
-                character.BodyGyro.MaxTorque = movers.Gyro
-            end)
-        end
-        if character.BodyVelocity then
-            pcall(function()
-                character.BodyVelocity.MaxForce = movers.Velocity
-            end)
-        end
-        if character.BodyForce then
-            pcall(function()
-                character.BodyForce.Force = movers.Force
-            end)
-        end
-        if character.BodyPosition then
-            pcall(function()
-                character.BodyPosition.MaxForce = movers.Position
-            end)
-        end
-        if character.LinearVelocity then
-            pcall(function()
-                character.LinearVelocity.Enabled = movers.LinearEnabled
-            end)
-        end
-    end
-    RagdollState.SavedMovers = nil
-
+    -- Stand the creature up at the rolled XZ with its saved yaw, then snap it
+    -- onto the floor beneath it.
     if root and root.Parent then
         local yaw = 0
         local savedFrame = RagdollState.SavedCFrame
-        local position = savedFrame and savedFrame.Position or root.Position
         if savedFrame then
             pcall(function()
                 local _, savedYaw = savedFrame:ToOrientation()
@@ -1901,11 +2615,15 @@ local function StopRagdoll(silent)
                 local _, currentYaw = root.CFrame:ToOrientation()
                 yaw = currentYaw
             end)
-            local groundY = GetRagdollGroundY(root, root.Parent)
-            if groundY then
-                position = Vector3.new(position.X, groundY + root.Size.Y * 0.5 + 1, position.Z)
-            end
         end
+
+        local position = root.Position
+        local groundY = GetRagdollGroundY(root, root.Parent)
+        if groundY then
+            local offset = math.max(RagdollState.SavedStandOffset or 2, 2)
+            position = Vector3.new(position.X, groundY + offset, position.Z)
+        end
+
         local upright = CFrame.new(position) * CFrame.Angles(0, yaw, 0)
         pcall(function()
             root.CFrame = upright
@@ -1922,15 +2640,50 @@ local function StopRagdoll(silent)
                 character.BodyVelocity.Velocity = Vector3.new(0, 0, 0)
             end)
         end
+    end
+
+    RestoreRagdollParts()
+    RestoreRagdollMovers()
+
+    if character then
+        ClearFakeAnimationState(character)
+        -- BodyGyro.MaxTorque is only configured when the character is built;
+        -- the controller does not rewrite it. Restoring it is what stops the
+        -- "I can walk but I still roll" limbo after UNRAGDOLL.
         pcall(function()
-            root.Anchored = RagdollState.SavedRootAnchored
+            if character.BodyGyro then
+                local torque = character.BodyGyro.MaxTorque
+                if torque.Magnitude < 1 then
+                    character.BodyGyro.MaxTorque = RagdollState.DefaultGyroTorque
+                end
+            end
+            character.IgnoreStateTransitions = false
+            if character.SetState then
+                character:SetState(RagdollState.SavedState or character.State or "Idle")
+            end
+        end)
+    end
+
+    if root and root.Parent then
+        pcall(function()
+            root.Anchored = savedAnchored
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            if character and character.BodyGyro then
+                character.BodyGyro.CFrame = root.CFrame
+            end
+            if character and character.BodyVelocity then
+                character.BodyVelocity.Velocity = Vector3.new(0, 0, 0)
+            end
         end)
     end
 
     RagdollState.Character = nil
     RagdollState.Root = nil
     RagdollState.SavedCFrame = nil
+    RagdollState.SavedState = nil
     RagdollState.SavedRootAnchored = false
+    RagdollState.SavedStandOffset = 2
 
     if not silent and SafeSetStatus then
         SafeSetStatus("RAGDOLL_OFF")
@@ -1961,27 +2714,43 @@ local function StartRagdoll()
     RagdollState.Root = root
     RagdollState.SavedRootAnchored = root.Anchored
     RagdollState.SavedCFrame = root.CFrame
+    RagdollState.SavedState = character.State
     RagdollState.SavedTracks = {}
-    RagdollState.SavedMovers = {
-        Gyro = character.BodyGyro and character.BodyGyro.MaxTorque or nil,
-        Velocity = character.BodyVelocity and character.BodyVelocity.MaxForce or nil,
-        Force = character.BodyForce and character.BodyForce.Force or nil,
-        Position = character.BodyPosition and character.BodyPosition.MaxForce or nil,
-        LinearEnabled = character.LinearVelocity and character.LinearVelocity.Enabled or nil
-    }
 
-    -- Pin the root so the tumble stays in place, then freeze every playing
-    -- track so the creature holds its current pose like a statue.
-    root.Anchored = true
-    NeutralizeRagdollMovers(character)
+    -- Capture the current momentum before the game's movers are detached.
+    local momentum = Vector3.new(0, 0, 0)
     pcall(function()
-        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        local velocity = root.AssemblyLinearVelocity
+        momentum = Vector3.new(velocity.X, 0, velocity.Z)
+        if momentum.Magnitude > RAGDOLL_MAX_MOMENTUM then
+            momentum = momentum.Unit * RAGDOLL_MAX_MOMENTUM
+        end
     end)
-    FreezeRagdollAnimations(character)
 
-    local spinEvent = RunService.Heartbeat
-    RagdollState.Connection = spinEvent:Connect(function(deltaTime)
+    -- Save the upright ground offset and enable collisions while the pose is
+    -- still standing, so the restore has the correct numbers.
+    PrepareRagdollParts(character, root)
+
+    -- Hold the idle pose rigidly, then detach the movers so the controller
+    -- cannot fight the physics body every frame.
+    EnterRagdollIdle(character)
+    FreezeRagdollAnimations(character)
+    DetachRagdollMovers(character, root.Parent)
+
+    pcall(function()
+        root.Anchored = false
+        root.AssemblyLinearVelocity = momentum
+        local right = root.CFrame.RightVector
+        local axis = Vector3.new(right.X, 0, right.Z)
+        if axis.Magnitude > 0.001 then
+            axis = axis.Unit
+        else
+            axis = Vector3.new(1, 0, 0)
+        end
+        root.AssemblyAngularVelocity = axis * RAGDOLL_TOPPLE_SPEED
+    end)
+
+    RagdollState.Connection = RunService.Heartbeat:Connect(function()
         if not SessionActive() then
             StopRagdoll(true)
             return
@@ -1994,12 +2763,13 @@ local function StartRagdoll()
             return
         end
 
-        local dt = math.clamp(deltaTime or 0.016, 0, 0.1)
-        local step = dt * RAGDOLL_SPIN_SPEED
+        -- Physics owns the CFrame now. Only keep the controller neutral, the
+        -- body unanchored, and the idle pose frozen.
         pcall(function()
-            rigRoot.CFrame = rigRoot.CFrame * CFrame.Angles(step, step, step)
+            if rigRoot.Anchored then
+                rigRoot.Anchored = false
+            end
         end)
-        rigRoot.Anchored = true
         NeutralizeRagdollMovers(rig)
         FreezeRagdollAnimations(rig)
     end)
@@ -2016,6 +2786,7 @@ local function PreviewAnimation(entry)
     end
 
     StopRagdoll(true)
+    ANIMATION_SWAP.Stop(true)
 
     local character = GetCosCharacter()
     if not character then
@@ -2220,12 +2991,12 @@ local function UpdateAnimationScopeButton()
         return
     end
     if Toggles.AnimationSearchAll then
-        AnimationUI.ScopeButton.Text = "SCOPE: ALL CREATURES [" .. tostring(#ANIMATION_CATALOG) .. "]"
+        AnimationUI.ScopeButton.Text = "SCOPE: ALL (" .. tostring(#ANIMATION_CATALOG) .. ")"
     else
         local count = ANIMATION_CURRENT_SPECIES
             and (ANIMATION_SPECIES_COUNTS[ANIMATION_CURRENT_SPECIES] or 0)
             or 0
-        AnimationUI.ScopeButton.Text = "SCOPE: CURRENT CREATURE [" .. tostring(count) .. "]"
+        AnimationUI.ScopeButton.Text = "SCOPE: CURRENT (" .. tostring(count) .. ")"
     end
 end
 
@@ -2363,22 +3134,9 @@ CleanupSession = function()
 end
 
 -- // Shared inputs
-local function IsTypingInTextBox()
-    local ok, focused = pcall(function()
-        if type(UserInputService.GetFocusedTextBox) ~= "function" then
-            return nil
-        end
-        return UserInputService:GetFocusedTextBox()
-    end)
-    return ok and focused ~= nil
-end
-
 TrackConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not SessionActive() or gameProcessed then
         return
-    end
-    if input.KeyCode == Enum.KeyCode.N and not MyWindow.IsListeningForKey and not IsTypingInTextBox() then
-        CycleAnimation(1)
     end
     if flyInputs[input.KeyCode.Name] ~= nil then
         flyInputs[input.KeyCode.Name] = true
@@ -2426,12 +3184,14 @@ end
 if LocalPlayer.CharacterRemoving then
     TrackConnection(LocalPlayer.CharacterRemoving:Connect(function()
         StopRagdoll(true)
+        ANIMATION_SWAP.Stop(true)
         pcall(StopForeignPreview)
         ANIMATION_PREVIEW.Active = false
         ANIMATION_PREVIEW.Name = nil
         ANIMATION_PREVIEW.Species = nil
         ANIMATION_PREVIEW.Foreign = false
         UpdateAnimationStatus(true)
+        ANIMATION_SWAP.UpdateStatus(true)
     end))
 end
 
@@ -2475,6 +3235,8 @@ TrackConnection(RunService.Heartbeat:Connect(function()
         RestoreHUDVisibility()
     end
     UpdateAnimationStatus(false)
+    ANIMATION_SWAP.Enforce()
+    ANIMATION_SWAP.UpdateStatus(false)
     UpdateStatusCards(false)
 end))
 
@@ -2955,6 +3717,32 @@ local function BuildUI()
         BuildAnimationCatalog()
 
         local theme = ApexLibrary.Theme
+
+        -- Custom controls in this card follow the same hover and border
+        -- treatment as the library's own action/list buttons.
+        local function AddFeatureHover(button, baseColor, canHover)
+            local function targetColor()
+                if type(baseColor) == "function" then
+                    return baseColor()
+                end
+                return baseColor or theme.Input
+            end
+            button.MouseEnter:Connect(function()
+                if button.Parent and (not canHover or canHover()) then
+                    TweenService:Create(button, TweenInfo.new(0.12), {
+                        BackgroundColor3 = theme.TabBar
+                    }):Play()
+                end
+            end)
+            button.MouseLeave:Connect(function()
+                if button.Parent then
+                    TweenService:Create(button, TweenInfo.new(0.12), {
+                        BackgroundColor3 = targetColor()
+                    }):Play()
+                end
+            end)
+        end
+
         local card = Instance.new("Frame")
         card.Name = "AnimationSwapperCard"
         card.Size = UDim2.new(1, 0, 0, 420)
@@ -3006,6 +3794,7 @@ local function BuildUI()
         searchBox.ClearTextOnFocus = false
         searchBox.TextXAlignment = Enum.TextXAlignment.Left
         local searchStroke = Instance.new("UIStroke")
+        searchStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         searchStroke.Color = theme.Border
         searchStroke.Thickness = 1
         searchStroke.Parent = searchBox
@@ -3022,15 +3811,18 @@ local function BuildUI()
         scopeButton.BackgroundColor3 = theme.Input
         scopeButton.BorderSizePixel = 0
         scopeButton.Font = Enum.Font.RobotoMono
-        scopeButton.Text = "SCOPE: CURRENT CREATURE"
+        scopeButton.Text = "SCOPE: CURRENT"
         scopeButton.TextColor3 = theme.Text
-        scopeButton.TextSize = 10
+        scopeButton.TextSize = 11
         scopeButton.AutoButtonColor = false
+        scopeButton.TextTruncate = Enum.TextTruncate.AtEnd
         scopeButton.Parent = card
         local scopeStroke = Instance.new("UIStroke")
+        scopeStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         scopeStroke.Color = theme.Border
         scopeStroke.Thickness = 1
         scopeStroke.Parent = scopeButton
+        AddFeatureHover(scopeButton, theme.Input)
 
         local loopButton = Instance.new("TextButton")
         loopButton.Name = "AnimationLoopButton"
@@ -3041,13 +3833,16 @@ local function BuildUI()
         loopButton.Font = Enum.Font.RobotoMono
         loopButton.Text = "LOOP PREVIEW: ON"
         loopButton.TextColor3 = theme.Text
-        loopButton.TextSize = 10
+        loopButton.TextSize = 11
         loopButton.AutoButtonColor = false
+        loopButton.TextTruncate = Enum.TextTruncate.AtEnd
         loopButton.Parent = card
         local loopStroke = Instance.new("UIStroke")
+        loopStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         loopStroke.Color = theme.Border
         loopStroke.Thickness = 1
         loopStroke.Parent = loopButton
+        AddFeatureHover(loopButton, theme.Input)
 
         local categoryDropdown = Instance.new("TextButton")
         categoryDropdown.Name = "AnimationCategoryDropdown"
@@ -3058,14 +3853,17 @@ local function BuildUI()
         categoryDropdown.Font = Enum.Font.RobotoMono
         categoryDropdown.Text = "TYPE: ALL"
         categoryDropdown.TextColor3 = theme.Text
-        categoryDropdown.TextSize = 10
+        categoryDropdown.TextSize = 11
         categoryDropdown.AutoButtonColor = false
+        categoryDropdown.TextTruncate = Enum.TextTruncate.AtEnd
         categoryDropdown.ZIndex = 22
         categoryDropdown.Parent = card
         local categoryDropdownStroke = Instance.new("UIStroke")
+        categoryDropdownStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         categoryDropdownStroke.Color = theme.Border
         categoryDropdownStroke.Thickness = 1
         categoryDropdownStroke.Parent = categoryDropdown
+        AddFeatureHover(categoryDropdown, theme.Input)
 
         local categoryMenu = Instance.new("ScrollingFrame")
         categoryMenu.Name = "AnimationCategoryMenu"
@@ -3081,6 +3879,7 @@ local function BuildUI()
         categoryMenu.ScrollBarImageColor3 = theme.Border
         categoryMenu.Parent = card
         local categoryMenuStroke = Instance.new("UIStroke")
+        categoryMenuStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         categoryMenuStroke.Color = theme.Border
         categoryMenuStroke.Thickness = 1
         categoryMenuStroke.Parent = categoryMenu
@@ -3107,14 +3906,21 @@ local function BuildUI()
             button.Font = Enum.Font.RobotoMono
             button.Text = category
             button.TextColor3 = theme.Muted
-            button.TextSize = 10
+            button.TextSize = 11
             button.AutoButtonColor = false
+            button.TextTruncate = Enum.TextTruncate.AtEnd
             button.ZIndex = 21
             button.Parent = categoryMenu
             local stroke = Instance.new("UIStroke")
+            stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
             stroke.Color = theme.Border
             stroke.Thickness = 1
             stroke.Parent = button
+            AddFeatureHover(button, function()
+                return (AnimationUI.Category == category) and theme.TabActive or theme.Input
+            end, function()
+                return AnimationUI.Category ~= category
+            end)
             categoryButtons[category] = { Button = button, Stroke = stroke }
             button.Activated:Connect(function()
                 AnimationUI.Category = category
@@ -3137,7 +3943,7 @@ local function BuildUI()
             categoryDropdownStroke.Color = accent
             for category, entry in pairs(categoryButtons) do
                 local active = AnimationUI.Category == category
-                entry.Button.BackgroundColor3 = active and accent or theme.Input
+                entry.Button.BackgroundColor3 = active and theme.TabActive or theme.Input
                 entry.Button.TextColor3 = active and theme.Text or theme.Muted
                 entry.Stroke.Color = active and accent or theme.Border
             end
@@ -3156,13 +3962,16 @@ local function BuildUI()
         randomButton.Font = Enum.Font.RobotoMono
         randomButton.Text = "RANDOM PREVIEW"
         randomButton.TextColor3 = theme.Text
-        randomButton.TextSize = 10
+        randomButton.TextSize = 11
         randomButton.AutoButtonColor = false
+        randomButton.TextTruncate = Enum.TextTruncate.AtEnd
         randomButton.Parent = card
         local randomStroke = Instance.new("UIStroke")
+        randomStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         randomStroke.Color = theme.Border
         randomStroke.Thickness = 1
         randomStroke.Parent = randomButton
+        AddFeatureHover(randomButton, theme.Input)
 
         local nextButton = Instance.new("TextButton")
         nextButton.Name = "AnimationNextButton"
@@ -3171,15 +3980,18 @@ local function BuildUI()
         nextButton.BackgroundColor3 = theme.Input
         nextButton.BorderSizePixel = 0
         nextButton.Font = Enum.Font.RobotoMono
-        nextButton.Text = "NEXT PREVIEW [N]"
+        nextButton.Text = "NEXT PREVIEW"
         nextButton.TextColor3 = theme.Text
-        nextButton.TextSize = 10
+        nextButton.TextSize = 11
         nextButton.AutoButtonColor = false
+        nextButton.TextTruncate = Enum.TextTruncate.AtEnd
         nextButton.Parent = card
         local nextStroke = Instance.new("UIStroke")
+        nextStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         nextStroke.Color = theme.Border
         nextStroke.Thickness = 1
         nextStroke.Parent = nextButton
+        AddFeatureHover(nextButton, theme.Input)
 
         randomButton.Activated:Connect(PreviewRandomAnimation)
         nextButton.Activated:Connect(function()
@@ -3258,7 +4070,7 @@ local function BuildUI()
             button.Font = Enum.Font.RobotoMono
             button.Text = tostring(text)
             button.TextColor3 = color or theme.Text
-            button.TextSize = 11
+            button.TextSize = 12
             button.TextXAlignment = Enum.TextXAlignment.Left
             button.TextTruncate = Enum.TextTruncate.AtEnd
             button.LayoutOrder = order
@@ -3268,9 +4080,11 @@ local function BuildUI()
             buttonPadding.PaddingRight = UDim.new(0, 8)
             buttonPadding.Parent = button
             local stroke = Instance.new("UIStroke")
+            stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
             stroke.Color = color or theme.Border
             stroke.Transparency = 0.35
             stroke.Parent = button
+            AddFeatureHover(button, theme.Input)
             button.Activated:Connect(function()
                 if callback then
                     pcall(callback)
@@ -3334,17 +4148,306 @@ local function BuildUI()
 
         tab:CreateButton(
             "RESTORE_ORIGINAL_ANIMATIONS",
-            "Stop the preview and return the current creature to its own animation set.",
+            "Stop the preview or pack replacement and return the current creature to its own animation set.",
             function()
                 RestoreOriginalAnimations()
                 SafeSetStatus("ANIMATION_RESTORED")
             end
         )
 
+        tab:CreateSectionLabel("CREATURE ANIMATION PACK")
+        local packCard = Instance.new("Frame")
+        packCard.Name = "AnimationPackCard"
+        packCard.Size = UDim2.new(1, 0, 0, 346)
+        packCard.BackgroundColor3 = theme.Card
+        packCard.BorderSizePixel = 0
+        packCard.Parent = tab:GetContainer()
+
+        local packTitle = Instance.new("TextLabel")
+        packTitle.Name = "AnimationPackTitle"
+        packTitle.Size = UDim2.new(1, -32, 0, 18)
+        packTitle.Position = UDim2.new(0, 16, 0, 8)
+        packTitle.BackgroundTransparency = 1
+        packTitle.Font = Enum.Font.RobotoMono
+        packTitle.Text = "REPLACE FULL ANIMATION PACK"
+        packTitle.TextColor3 = GetAccentColor()
+        packTitle.TextSize = 11
+        packTitle.TextTruncate = Enum.TextTruncate.AtEnd
+        packTitle.TextXAlignment = Enum.TextXAlignment.Left
+        packTitle.Parent = packCard
+
+        local packDesc = Instance.new("TextLabel")
+        packDesc.Size = UDim2.new(1, -32, 0, 40)
+        packDesc.Position = UDim2.new(0, 16, 0, 28)
+        packDesc.BackgroundTransparency = 1
+        packDesc.Font = Enum.Font.Roboto
+        packDesc.Text = "Choose a creature from the animation library. Its entire set replaces your Idle, Walk, Run, Swim, and action animations until RESET."
+        packDesc.TextColor3 = theme.Muted
+        packDesc.TextSize = 11
+        packDesc.TextWrapped = true
+        packDesc.TextXAlignment = Enum.TextXAlignment.Left
+        packDesc.TextYAlignment = Enum.TextYAlignment.Top
+        packDesc.Parent = packCard
+
+        local packSelected = Instance.new("TextLabel")
+        packSelected.Name = "AnimationPackSelected"
+        packSelected.Size = UDim2.new(1, -32, 0, 16)
+        packSelected.Position = UDim2.new(0, 16, 0, 70)
+        packSelected.BackgroundTransparency = 1
+        packSelected.Font = Enum.Font.RobotoMono
+        packSelected.Text = "PACK: NONE SELECTED"
+        packSelected.TextColor3 = theme.Text
+        packSelected.TextSize = 11
+        packSelected.TextTruncate = Enum.TextTruncate.AtEnd
+        packSelected.TextXAlignment = Enum.TextXAlignment.Left
+        packSelected.Parent = packCard
+
+        local packSearch = Instance.new("TextBox")
+        packSearch.Name = "AnimationPackSearch"
+        packSearch.Size = UDim2.new(1, -32, 0, 28)
+        packSearch.Position = UDim2.new(0, 16, 0, 90)
+        packSearch.BackgroundColor3 = theme.Input
+        packSearch.BorderSizePixel = 0
+        packSearch.Font = Enum.Font.RobotoMono
+        packSearch.Text = ""
+        packSearch.PlaceholderText = "Search creature pack..."
+        packSearch.PlaceholderColor3 = theme.Muted
+        packSearch.TextColor3 = theme.Text
+        packSearch.TextSize = 12
+        packSearch.ClearTextOnFocus = false
+        packSearch.TextXAlignment = Enum.TextXAlignment.Left
+        local packSearchStroke = Instance.new("UIStroke")
+        packSearchStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        packSearchStroke.Color = theme.Border
+        packSearchStroke.Thickness = 1
+        packSearchStroke.Parent = packSearch
+        local packSearchPadding = Instance.new("UIPadding")
+        packSearchPadding.PaddingLeft = UDim.new(0, 8)
+        packSearchPadding.PaddingRight = UDim.new(0, 8)
+        packSearchPadding.Parent = packSearch
+        packSearch.Parent = packCard
+
+        local packCountLabel = Instance.new("TextLabel")
+        packCountLabel.Name = "AnimationPackCount"
+        packCountLabel.Size = UDim2.new(1, -32, 0, 12)
+        packCountLabel.Position = UDim2.new(0, 16, 0, 122)
+        packCountLabel.BackgroundTransparency = 1
+        packCountLabel.Font = Enum.Font.RobotoMono
+        packCountLabel.Text = "0 PACKS"
+        packCountLabel.TextColor3 = theme.Muted
+        packCountLabel.TextSize = 9
+        packCountLabel.TextXAlignment = Enum.TextXAlignment.Left
+        packCountLabel.Parent = packCard
+
+        local packList = Instance.new("ScrollingFrame")
+        packList.Name = "AnimationPackList"
+        packList.Size = UDim2.new(1, -32, 0, 104)
+        packList.Position = UDim2.new(0, 16, 0, 138)
+        packList.BackgroundColor3 = theme.Input
+        packList.BackgroundTransparency = 0.35
+        packList.BorderSizePixel = 0
+        packList.CanvasSize = UDim2.new(0, 0, 0, 0)
+        packList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        packList.ScrollBarThickness = 2
+        packList.ScrollBarImageColor3 = theme.Border
+        packList.Parent = packCard
+        local packListLayout = Instance.new("UIListLayout")
+        packListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        packListLayout.Padding = UDim.new(0, 3)
+        packListLayout.Parent = packList
+        local packListPadding = Instance.new("UIPadding")
+        packListPadding.PaddingTop = UDim.new(0, 3)
+        packListPadding.PaddingLeft = UDim.new(0, 3)
+        packListPadding.PaddingRight = UDim.new(0, 3)
+        packListPadding.PaddingBottom = UDim.new(0, 3)
+        packListPadding.Parent = packList
+
+        local function CreatePackButton(name, text, position, size)
+            local button = Instance.new("TextButton")
+            button.Name = name
+            button.Size = size
+            button.Position = position
+            button.BackgroundColor3 = theme.Input
+            button.BorderSizePixel = 0
+            button.Font = Enum.Font.RobotoMono
+            button.Text = text
+            button.TextColor3 = theme.Text
+            button.TextSize = 12
+            button.AutoButtonColor = false
+            button.TextTruncate = Enum.TextTruncate.AtEnd
+            button.TextXAlignment = Enum.TextXAlignment.Center
+            button.Parent = packCard
+            local stroke = Instance.new("UIStroke")
+            stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+            stroke.Color = theme.Border
+            stroke.Thickness = 1
+            stroke.Parent = button
+            AddFeatureHover(button, theme.Input)
+            return button, stroke
+        end
+
+        local packApply, packApplyStroke = CreatePackButton(
+            "AnimationPackApply",
+            "APPLY PACK",
+            UDim2.new(0, 16, 0, 250),
+            UDim2.new(0.58, -18, 0, 26)
+        )
+        local packReset, packResetStroke = CreatePackButton(
+            "AnimationPackReset",
+            "RESET",
+            UDim2.new(0.58, -2, 0, 250),
+            UDim2.new(0.42, -14, 0, 26)
+        )
+        packApply.TextColor3 = GetAccentColor()
+        packApplyStroke.Color = GetAccentColor()
+        packReset.TextColor3 = GetAccentColor()
+        packResetStroke.Color = GetAccentColor()
+
+        local packStatus = Instance.new("TextLabel")
+        packStatus.Name = "AnimationPackStatus"
+        packStatus.Size = UDim2.new(1, -32, 0, 52)
+        packStatus.Position = UDim2.new(0, 16, 0, 286)
+        packStatus.BackgroundTransparency = 1
+        packStatus.Font = Enum.Font.RobotoMono
+        packStatus.Text = "PLAYING: —"
+        packStatus.TextColor3 = theme.Muted
+        packStatus.TextSize = 11
+        packStatus.TextWrapped = true
+        packStatus.TextXAlignment = Enum.TextXAlignment.Left
+        packStatus.TextYAlignment = Enum.TextYAlignment.Top
+        packStatus.Parent = packCard
+
+        local packOrder = 0
+        local function RefreshPackList()
+            for _, child in ipairs(packList:GetChildren()) do
+                if child:IsA("GuiObject") then
+                    child:Destroy()
+                end
+            end
+            packOrder = 0
+
+            local query = string.lower(tostring(packSearch.Text or ""))
+            local matches = {}
+            for _, species in ipairs(ANIMATION_PACK_SPECIES) do
+                if query == "" or string.find(string.lower(species), query, 1, true) then
+                    matches[#matches + 1] = species
+                    if #matches >= 60 then
+                        break
+                    end
+                end
+            end
+
+            local total = #ANIMATION_PACK_SPECIES
+            if #matches >= 60 then
+                packCountLabel.Text = "SHOWING 60 / " .. tostring(total) .. " PACKS — TYPE TO NARROW"
+            elseif query == "" then
+                packCountLabel.Text = "SHOWING " .. tostring(math.min(total, 60)) .. " / " .. tostring(total) .. " PACKS — SEARCH TO FIND ONE"
+            else
+                packCountLabel.Text = tostring(#matches) .. " MATCH" .. (#matches == 1 and "" or "ES")
+            end
+
+            if #matches == 0 then
+                local empty = Instance.new("TextLabel")
+                empty.Size = UDim2.new(1, -6, 0, 24)
+                empty.BackgroundTransparency = 1
+                empty.Font = Enum.Font.RobotoMono
+                empty.Text = "NO CREATURE PACKS MATCH"
+                empty.TextColor3 = theme.Muted
+                empty.TextSize = 11
+                empty.TextXAlignment = Enum.TextXAlignment.Left
+                empty.Parent = packList
+                local emptyPadding = Instance.new("UIPadding")
+                emptyPadding.PaddingLeft = UDim.new(0, 6)
+                emptyPadding.Parent = empty
+                return
+            end
+
+            local accent = GetAccentColor()
+            for _, species in ipairs(matches) do
+                packOrder = packOrder + 1
+                local selected = ANIMATION_SWAP.TargetSpecies == species
+                local button = Instance.new("TextButton")
+                button.Name = "AnimationPack_" .. species
+                button.Size = UDim2.new(1, -6, 0, 24)
+                button.LayoutOrder = packOrder
+                button.BackgroundColor3 = selected and theme.TabActive or theme.Input
+                button.BorderSizePixel = 0
+                button.Font = Enum.Font.RobotoMono
+                button.Text = species .. "  ·  " .. tostring(ANIMATION_SPECIES_COUNTS[species] or 0) .. " tracks"
+                button.TextColor3 = selected and theme.Text or theme.Muted
+                button.TextSize = 11
+                button.AutoButtonColor = false
+                button.TextTruncate = Enum.TextTruncate.AtEnd
+                button.TextXAlignment = Enum.TextXAlignment.Left
+                button.Parent = packList
+                local padding = Instance.new("UIPadding")
+                padding.PaddingLeft = UDim.new(0, 7)
+                padding.PaddingRight = UDim.new(0, 6)
+                padding.Parent = button
+                local stroke = Instance.new("UIStroke")
+                stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+                stroke.Color = selected and accent or theme.Border
+                stroke.Thickness = 1
+                stroke.Parent = button
+                if not selected then
+                    AddFeatureHover(button, theme.Input)
+                end
+                button.Activated:Connect(function()
+                    ANIMATION_SWAP.SelectTarget(species)
+                end)
+            end
+        end
+        ANIMATION_SWAP.RefreshList = RefreshPackList
+
+        local packSearchToken = 0
+        TrackConnection(packSearch:GetPropertyChangedSignal("Text"):Connect(function()
+            packSearchToken = packSearchToken + 1
+            local token = packSearchToken
+            task.delay(0.1, function()
+                if token == packSearchToken and packSearch.Parent then
+                    RefreshPackList()
+                end
+            end)
+        end))
+        TrackConnection(packSearch.FocusLost:Connect(function()
+            RefreshPackList()
+        end))
+
+        ANIMATION_SWAP.UI.SelectedLabel = packSelected
+        ANIMATION_SWAP.UI.StatusLabel = packStatus
+        ANIMATION_SWAP.UI.ApplyButton = packApply
+        ANIMATION_SWAP.UI.ResetButton = packReset
+        ANIMATION_SWAP.UI.SearchBox = packSearch
+        ANIMATION_SWAP.UI.List = packList
+
+        ANIMATION_SWAP.UpdateTargetUI()
+        ANIMATION_SWAP.UpdateStatus(true)
+
+        packApply.Activated:Connect(function()
+            if not ANIMATION_SWAP.Start() then
+                ANIMATION_SWAP.UpdateStatus(true)
+            end
+        end)
+        packReset.Activated:Connect(function()
+            ANIMATION_SWAP.Stop(false)
+            SafeSetStatus("ANIMATION_RESTORED")
+        end)
+
+        if MyWindow and MyWindow.RegisterAccentListener then
+            MyWindow:RegisterAccentListener(function(color)
+                packTitle.TextColor3 = color
+                packApply.TextColor3 = color
+                packApplyStroke.Color = color
+                packReset.TextColor3 = color
+                packResetStroke.Color = color
+                RefreshPackList()
+            end)
+        end
+
         tab:CreateSectionLabel("RAGDOLL CONTROLS")
         tab:CreateKeybindButton(
             "RAGDOLL",
-            "Freeze the creature's animation pose and tumble the rigid model in place like the server ragdoll. The keybind is optional; clear it with X or click the action button.",
+            "Switch the creature to its idle pose and let gravity tumble the unanchored body with real physics. Movement control stays disabled until UNRAGDOLL. The keybind is optional; clear it with X or click the action button.",
             {
                 Key = KeybindToEnum(Keybinds.Ragdoll),
                 Required = false,
@@ -3360,7 +4463,7 @@ local function BuildUI()
         )
         tab:CreateKeybindButton(
             "UNRAGDOLL",
-            "Stop the tumble, restore the animation pose, and return control to COS.",
+            "Stand the creature back up, restore its animations and collisions, and return control to COS.",
             {
                 Key = KeybindToEnum(Keybinds.Unragdoll),
                 Required = false,
