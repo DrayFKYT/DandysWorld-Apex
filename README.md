@@ -56,7 +56,7 @@ The `CONFIG` tab's `OPEN / CLOSE MENU` row is a keybind-only row: clicking the k
 The interface is provided by [Apex-Gui-library](https://github.com/DrayFKYT/Apex-Gui-library):
 
 ```text
-https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/main/ApexLibraryPlus.lua
+https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua
 ```
 
 Both scripts download revision 12 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 12 adds the animated header fullscreen glyph, which expands the window and tab content to a centered 50% panel with only modest text growth; the mobile claw toggle stays layered above it. Revision 11 added `Tab:CreateKeybindButton` rows with optional action buttons and clear buttons; `ShowAction = false` leaves a keybind-only row.
