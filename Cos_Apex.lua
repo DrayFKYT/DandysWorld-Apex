@@ -1704,10 +1704,14 @@ end
 -- controller keeps driving its normal state machine, but every state now
 -- resolves to the selected creature's animation. The mapping stays installed
 -- until RESET, and the status line reports the live local tracks.
+-- Land states prefer their own tracks but fall back to the pack's swim tracks.
+-- This keeps sea-only packs usable on land creatures (Walk = Swim, Run =
+-- SwimFast, Idle = SwimIdle) while packs with complete land and water sets keep
+-- their normal mapping.
 local ANIMATION_PACK_FALLBACKS = {
-    Idle = { "Idle" },
-    Walk = { "Walk", "Run" },
-    Run = { "Run", "Walk" },
+    Idle = { "Idle", "SwimIdle", "Swim" },
+    Walk = { "Walk", "Run", "Swim", "SwimFast" },
+    Run = { "Run", "Walk", "SwimFast", "Swim" },
     Swim = { "Swim", "Walk" },
     SwimFast = { "SwimFast", "Swim", "Run" },
     SwimIdle = { "SwimIdle", "Swim", "Idle" },

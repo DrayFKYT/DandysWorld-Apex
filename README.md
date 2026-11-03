@@ -35,6 +35,7 @@ The `ANIMATION` tab adds a live animation swapper:
 - Loop toggle, reset to the current creature's original animation, and catalog refresh
 - Automatic preview cleanup on species change, respawn, or script unload
 - `CREATURE ANIMATION PACK` browser: search the full animation library by creature, select a pack, and apply its complete Idle, Walk, Run, Swim, and action set to the current rig until `RESET`
+- Sea-only packs without land movement still work on land creatures: their `Swim` becomes `Walk`, `SwimFast` becomes `Run`, and `SwimIdle` becomes `Idle`. Packs that have all land and water states map normally
 - The pack status line reports the selected creature, track count, and the animations currently playing on your creature; the swap is reasserted if the game controller replaces the track table
 
 The same tab has `RAGDOLL` and `UNRAGDOLL` action rows. Ragdoll switches the creature to its idle pose, freezes that pose, detaches the game's movement forces, enables collisions, and lets gravity and momentum roll the unanchored body with real physics; control stays disabled until you unragdoll. Unragdoll stands the creature back up at the spot where it rolled to, restores its collisions and animations, reattaches the movement forces, and returns control. Both rows have optional programmable keybinds, defaulting to `R` and `U`; press the adjacent `X` to clear a binding to `NONE`.
