@@ -35,7 +35,7 @@ The `ANIMATION` tab adds a live animation swapper:
 - Loop toggle, reset to the current creature's original animation, and catalog refresh
 - Automatic preview cleanup on species change, respawn, or script unload
 
-The same tab has `RAGDOLL` and `UNRAGDOLL` action rows. Ragdoll freezes the creature where it is and turns the major skeleton joints into free ball sockets, so the body goes limp and hangs in place; unragdoll restores the original joints, stands it back up, and returns control. Both rows have optional programmable keybinds, defaulting to `R` and `U`; press the adjacent `X` to clear a binding to `NONE`.
+The same tab has `RAGDOLL` and `UNRAGDOLL` action rows. Ragdoll freezes the creature's current animation pose, pins it in place, and tumbles the whole rigid model the same way the server ragdoll does; unragdoll restores the animation speeds, stands it upright, and returns control. Both rows have optional programmable keybinds, defaulting to `R` and `U`; press the adjacent `X` to clear a binding to `NONE`.
 
 The instant-menu drop timing is fixed at 1 second and 1,111,111 studs/second. `DROP_DURATION` and `DROP_SPEED` are no longer editable controls and are not read from the config file.
 
@@ -57,7 +57,7 @@ The interface is provided by [Apex-Gui-library](https://github.com/DrayFKYT/Apex
 https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/main/ApexLibraryPlus.lua
 ```
 
-Both scripts download revision 11 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 11 adds `Tab:CreateKeybindButton` rows with optional action buttons and clear buttons; `ShowAction = false` leaves a keybind-only row.
+Both scripts download revision 12 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 12 adds the header `FULL` / `EXIT` toggle, which expands the window and tab content to fill the screen with only modest text growth; the mobile claw toggle stays layered above it. Revision 11 added `Tab:CreateKeybindButton` rows with optional action buttons and clear buttons; `ShowAction = false` leaves a keybind-only row.
 
 ## Documentation
 

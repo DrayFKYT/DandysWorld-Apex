@@ -27,14 +27,14 @@
         and loads it automatically. Local copies are only a fallback.
 
     Library URL:
-        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/main/ApexLibraryPlus.lua?v=11
+        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/main/ApexLibraryPlus.lua?v=12
 ]================================================================]--
 
 -- // Apex Library Loader
 -- The version query bypasses executor HTTP caches that still hold an old
 -- library. MIN_LAYOUT_REVISION rejects stale copies that slip through.
-local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/main/ApexLibraryPlus.lua?v=11"
-local MIN_LAYOUT_REVISION = 11
+local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/main/ApexLibraryPlus.lua?v=12"
+local MIN_LAYOUT_REVISION = 12
 
 local function IsPlusLibrary(library)
     return type(library) == "table"
@@ -1741,85 +1741,22 @@ local function RestoreOriginalAnimations()
 end
 
 -- // Ragdoll -----------------------------------------------------------
--- Real client-side ragdoll. COS rigs have no Humanoid, so the major skeleton
--- Motor6Ds are temporarily replaced with free BallSocketConstraints, the
--- movement movers are neutralised, and gravity does the rest. The root is
--- pinned in place while it ragdolls, so the creature hangs limp where it was
--- instead of being flung or sliding. UNRAGDOLL re-enables every motor,
--- restores the part properties, and stands the rig up.
-local RAGDOLL_JOINT_VOLUME_RATIO = 0.05
+-- Mirrors the server ragdoll: the character's animations freeze in their
+-- current pose and the whole rigid model rolls like a statue. The root is
+-- pinned in place, so the creature tumbles where it was instead of sliding.
+-- UNRAGDOLL restores the animation speeds and stands the creature back up.
+local RAGDOLL_SPIN_SPEED = 3
 
 local RagdollState = {
     Active = false,
     Character = nil,
-    Model = nil,
     Root = nil,
     Connection = nil,
-    SteppedConnection = nil,
-    Joints = {},
-    SavedParts = {},
     SavedMovers = nil,
-    SavedRootAnchored = false
+    SavedRootAnchored = false,
+    SavedCFrame = nil,
+    SavedTracks = {}
 }
-
-local function RagdollPartVolume(part)
-    local size = part.Size
-    return size.X * size.Y * size.Z
-end
-
--- COS uses extra "S" shell meshes (UpperBodyS6, T4S4, ...) layered over the
--- main skeleton. They stay welded to their base part so the creature keeps
--- its shape while the base joints go limp.
-local function IsRagdollShellPart(part, model)
-    local base = string.match(part.Name, "^(.-)S%d*$")
-    if not base or base == "" then
-        return false
-    end
-    return model:FindFirstChild(base, true) ~= nil
-end
-
-local function CollectRagdollJoints(model)
-    local joints = {}
-    local seen = {}
-    local motorCounts = {}
-    local motors = {}
-    local largestVolume = 0
-    for _, motor in ipairs(model:GetDescendants()) do
-        if motor:IsA("Motor6D") and motor.Part0 and motor.Part1 then
-            motorCounts[motor.Part1] = (motorCounts[motor.Part1] or 0) + 1
-            motors[#motors + 1] = motor
-            local part1 = motor.Part1
-            if part1.Name ~= "Hitbox"
-                and part1.Name ~= "HumanoidRootPart"
-                and motor.Name ~= "ChatBubbleMotor"
-                and not IsRagdollShellPart(part1, model)
-            then
-                largestVolume = math.max(largestVolume, RagdollPartVolume(part1))
-            end
-        end
-    end
-    -- Scale the cut-off to the creature: small species still ragdoll, while a
-    -- large one only converts its major body sections.
-    local minVolume = math.max(1, largestVolume * RAGDOLL_JOINT_VOLUME_RATIO)
-    for _, motor in ipairs(motors) do
-        local part0 = motor.Part0
-        local part1 = motor.Part1
-        if part0:IsDescendantOf(model)
-            and part1:IsDescendantOf(model)
-            and motorCounts[part1] == 1
-            and part0.Name ~= "Hitbox"
-            and part1.Name ~= "Hitbox"
-            and motor.Name ~= "ChatBubbleMotor"
-            and RagdollPartVolume(part1) >= minVolume
-            and not IsRagdollShellPart(part1, model)
-            and not seen[part1]
-        then
-            seen[part1] = true
-            joints[#joints + 1] = motor
-        end
-    end
-    return joints
-end
 
 local function NeutralizeRagdollMovers(character)
     if character.BodyGyro then
@@ -1865,6 +1802,43 @@ local function GetRagdollGroundY(root, model)
     return hit and hit.Position.Y or nil
 end
 
+local function FreezeRagdollAnimations(character)
+    local animator = GetCosAnimator(character)
+    if not animator then
+        return
+    end
+    local ok, tracks = pcall(function()
+        return animator:GetPlayingAnimationTracks()
+    end)
+    if not ok or not tracks then
+        return
+    end
+    for _, track in ipairs(tracks) do
+        if track then
+            if not RagdollState.SavedTracks[track] then
+                local speed = 1
+                pcall(function()
+                    speed = track.Speed
+                end)
+                RagdollState.SavedTracks[track] = speed
+            end
+            pcall(function()
+                track:AdjustSpeed(0)
+            end)
+        end
+    end
+end
+
+local function RestoreRagdollAnimations()
+    local tracks = RagdollState.SavedTracks
+    RagdollState.SavedTracks = {}
+    for track, speed in pairs(tracks) do
+        pcall(function()
+            track:AdjustSpeed(speed)
+        end)
+    end
+end
+
 local function StopRagdoll(silent)
     if not RagdollState.Active then
         return
@@ -1877,46 +1851,11 @@ local function StopRagdoll(silent)
         end)
         RagdollState.Connection = nil
     end
-    if RagdollState.SteppedConnection then
-        pcall(function()
-            RagdollState.SteppedConnection:Disconnect()
-        end)
-        RagdollState.SteppedConnection = nil
-    end
 
     local character = RagdollState.Character
     local root = RagdollState.Root
 
-    -- Restore the skeleton first so nothing is left simulated.
-    for _, motor in ipairs(RagdollState.Joints) do
-        pcall(function()
-            if motor.Parent then
-                motor.Enabled = true
-            end
-        end)
-    end
-    for _, item in ipairs(RagdollState.Attachments) do
-        pcall(function()
-            item:Destroy()
-        end)
-    end
-    for _, item in ipairs(RagdollState.Constraints) do
-        pcall(function()
-            item:Destroy()
-        end)
-    end
-    RagdollState.Joints = {}
-    RagdollState.Attachments = {}
-    RagdollState.Constraints = {}
-
-    for part, saved in pairs(RagdollState.SavedParts) do
-        pcall(function()
-            if part.Parent then
-                part.Massless = saved.Massless
-            end
-        end)
-    end
-    RagdollState.SavedParts = {}
+    RestoreRagdollAnimations()
 
     local movers = RagdollState.SavedMovers
     if movers and character then
@@ -1950,16 +1889,24 @@ local function StopRagdoll(silent)
 
     if root and root.Parent then
         local yaw = 0
-        pcall(function()
-            local _, currentYaw = root.CFrame:ToOrientation()
-            yaw = currentYaw
-        end)
-        local x, y, z = root.Position.X, root.Position.Y, root.Position.Z
-        local groundY = GetRagdollGroundY(root, root.Parent)
-        if groundY then
-            y = groundY + root.Size.Y * 0.5 + 1
+        local savedFrame = RagdollState.SavedCFrame
+        local position = savedFrame and savedFrame.Position or root.Position
+        if savedFrame then
+            pcall(function()
+                local _, savedYaw = savedFrame:ToOrientation()
+                yaw = savedYaw
+            end)
+        else
+            pcall(function()
+                local _, currentYaw = root.CFrame:ToOrientation()
+                yaw = currentYaw
+            end)
+            local groundY = GetRagdollGroundY(root, root.Parent)
+            if groundY then
+                position = Vector3.new(position.X, groundY + root.Size.Y * 0.5 + 1, position.Z)
+            end
         end
-        local upright = CFrame.new(Vector3.new(x, y, z)) * CFrame.Angles(0, yaw, 0)
+        local upright = CFrame.new(position) * CFrame.Angles(0, yaw, 0)
         pcall(function()
             root.CFrame = upright
             root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
@@ -1981,8 +1928,8 @@ local function StopRagdoll(silent)
     end
 
     RagdollState.Character = nil
-    RagdollState.Model = nil
     RagdollState.Root = nil
+    RagdollState.SavedCFrame = nil
     RagdollState.SavedRootAnchored = false
 
     if not silent and SafeSetStatus then
@@ -2000,16 +1947,7 @@ local function StartRagdoll()
 
     local character = GetCosCharacter()
     local root = character and character.Root
-    local model = root and root.Parent
-    if not character or not root or not root.Parent or not model then
-        if SafeSetStatus then
-            SafeSetStatus("RAGDOLL_NO_CREATURE")
-        end
-        return false
-    end
-
-    local joints = CollectRagdollJoints(model)
-    if #joints == 0 then
+    if not character or not root or not root.Parent then
         if SafeSetStatus then
             SafeSetStatus("RAGDOLL_NO_CREATURE")
         end
@@ -2020,13 +1958,10 @@ local function StartRagdoll()
 
     RagdollState.Active = true
     RagdollState.Character = character
-    RagdollState.Model = model
     RagdollState.Root = root
-    RagdollState.Joints = joints
-    RagdollState.SavedParts = {}
-    RagdollState.Attachments = {}
-    RagdollState.Constraints = {}
     RagdollState.SavedRootAnchored = root.Anchored
+    RagdollState.SavedCFrame = root.CFrame
+    RagdollState.SavedTracks = {}
     RagdollState.SavedMovers = {
         Gyro = character.BodyGyro and character.BodyGyro.MaxTorque or nil,
         Velocity = character.BodyVelocity and character.BodyVelocity.MaxForce or nil,
@@ -2035,79 +1970,18 @@ local function StartRagdoll()
         LinearEnabled = character.LinearVelocity and character.LinearVelocity.Enabled or nil
     }
 
-    -- Give the major body parts weight so the ragdoll actually falls limp.
-    for _, motor in ipairs(joints) do
-        local part = motor.Part1
-        if part and part ~= root and not RagdollState.SavedParts[part] then
-            RagdollState.SavedParts[part] = { Massless = part.Massless }
-            pcall(function()
-                part.Massless = false
-            end)
-        end
-    end
-
-    -- Replace every selected weld joint with a free ball socket. Attachments
-    -- sit on the motor's current pivot so the pose does not pop.
-    for _, motor in ipairs(joints) do
-        local part0 = motor.Part0
-        local part1 = motor.Part1
-        if part0 and part1 and part0.Parent and part1.Parent then
-            local att0, att1, socket
-            local ok = pcall(function()
-                -- Use the animated joint pivot, not the rest C0/C1 offsets, so
-                -- the transition into the ragdoll does not pop the current pose.
-                local pivot = (part0.CFrame * motor.C0 * motor.Transform).Position
-                att0 = Instance.new("Attachment")
-                att0.Name = "ApexRagdollA0"
-                att0.Parent = part0
-                att0.WorldPosition = pivot
-
-                att1 = Instance.new("Attachment")
-                att1.Name = "ApexRagdollA1"
-                att1.Parent = part1
-                att1.WorldPosition = pivot
-
-                socket = Instance.new("BallSocketConstraint")
-                socket.Name = "ApexRagdollSocket"
-                socket.Attachment0 = att0
-                socket.Attachment1 = att1
-                socket.LimitsEnabled = false
-                socket.TwistLimitsEnabled = false
-                socket.Parent = model
-
-                motor.Enabled = false
-            end)
-            if ok and socket then
-                RagdollState.Attachments[#RagdollState.Attachments + 1] = att0
-                RagdollState.Attachments[#RagdollState.Attachments + 1] = att1
-                RagdollState.Constraints[#RagdollState.Constraints + 1] = socket
-            else
-                pcall(function()
-                    if socket then
-                        socket:Destroy()
-                    end
-                    if att0 then
-                        att0:Destroy()
-                    end
-                    if att1 then
-                        att1:Destroy()
-                    end
-                end)
-            end
-        end
-    end
-
-    -- Pin the root where the ragdoll was triggered. The limbs still fall
-    -- freely on their sockets, but the creature keeps its server position.
+    -- Pin the root so the tumble stays in place, then freeze every playing
+    -- track so the creature holds its current pose like a statue.
     root.Anchored = true
     NeutralizeRagdollMovers(character)
-
     pcall(function()
         root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     end)
+    FreezeRagdollAnimations(character)
 
-    RagdollState.Connection = RunService.Heartbeat:Connect(function()
+    local spinEvent = RunService.Heartbeat
+    RagdollState.Connection = spinEvent:Connect(function(deltaTime)
         if not SessionActive() then
             StopRagdoll(true)
             return
@@ -2120,33 +1994,15 @@ local function StartRagdoll()
             return
         end
 
-        rigRoot.Anchored = true
-        for _, motor in ipairs(RagdollState.Joints) do
-            if motor.Enabled then
-                motor.Enabled = false
-            end
-        end
-        NeutralizeRagdollMovers(rig)
-    end)
-
-    -- Stepped runs immediately before physics, so the pin and neutral movers
-    -- survive even if the game rewrites them in a later Heartbeat handler.
-    if RunService.Stepped then
-        RagdollState.SteppedConnection = RunService.Stepped:Connect(function()
-            local rig = RagdollState.Character
-            local rigRoot = RagdollState.Root
-            if not rig or not rigRoot or not rigRoot.Parent then
-                return
-            end
-            rigRoot.Anchored = true
-            for _, motor in ipairs(RagdollState.Joints) do
-                if motor.Enabled then
-                    motor.Enabled = false
-                end
-            end
-            NeutralizeRagdollMovers(rig)
+        local dt = math.clamp(deltaTime or 0.016, 0, 0.1)
+        local step = dt * RAGDOLL_SPIN_SPEED
+        pcall(function()
+            rigRoot.CFrame = rigRoot.CFrame * CFrame.Angles(step, step, step)
         end)
-    end
+        rigRoot.Anchored = true
+        NeutralizeRagdollMovers(rig)
+        FreezeRagdollAnimations(rig)
+    end)
 
     if SafeSetStatus then
         SafeSetStatus("RAGDOLL_ON")
@@ -3488,7 +3344,7 @@ local function BuildUI()
         tab:CreateSectionLabel("RAGDOLL CONTROLS")
         tab:CreateKeybindButton(
             "RAGDOLL",
-            "Freeze the creature in place and drop its body into a physical ragdoll. The keybind is optional; clear it with X or click the action button.",
+            "Freeze the creature's animation pose and tumble the rigid model in place like the server ragdoll. The keybind is optional; clear it with X or click the action button.",
             {
                 Key = KeybindToEnum(Keybinds.Ragdoll),
                 Required = false,
@@ -3504,7 +3360,7 @@ local function BuildUI()
         )
         tab:CreateKeybindButton(
             "UNRAGDOLL",
-            "Restore the skeleton, stand the creature up, and return control to COS.",
+            "Stop the tumble, restore the animation pose, and return control to COS.",
             {
                 Key = KeybindToEnum(Keybinds.Unragdoll),
                 Required = false,
