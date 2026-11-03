@@ -1743,8 +1743,10 @@ end
 -- // Ragdoll -----------------------------------------------------------
 -- Real client-side ragdoll. COS rigs have no Humanoid, so the major skeleton
 -- Motor6Ds are temporarily replaced with free BallSocketConstraints, the
--- movement movers are neutralised, and gravity does the rest. UNRAGDOLL
--- re-enables every motor, restores the part properties, and stands the rig up.
+-- movement movers are neutralised, and gravity does the rest. The root is
+-- pinned in place while it ragdolls, so the creature hangs limp where it was
+-- instead of being flung or sliding. UNRAGDOLL re-enables every motor,
+-- restores the part properties, and stands the rig up.
 local RAGDOLL_JOINT_VOLUME_RATIO = 0.05
 
 local RagdollState = {
@@ -2095,23 +2097,14 @@ local function StartRagdoll()
         end
     end
 
-    root.Anchored = false
+    -- Pin the root where the ragdoll was triggered. The limbs still fall
+    -- freely on their sockets, but the creature keeps its server position.
+    root.Anchored = true
     NeutralizeRagdollMovers(character)
 
     pcall(function()
-        local velocity = root.AssemblyLinearVelocity
-        local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
-        if horizontal.Magnitude > 80 then
-            velocity = Vector3.new(horizontal.Unit.X * 80, velocity.Y, horizontal.Unit.Z * 80)
-        end
-        local angle = math.random() * math.pi * 2
-        local push = 3 + math.random() * 3
-        root.AssemblyLinearVelocity = velocity + Vector3.new(math.cos(angle) * push, 2, math.sin(angle) * push)
-        root.AssemblyAngularVelocity = Vector3.new(
-            (math.random() - 0.5) * 4,
-            (math.random() - 0.5) * 4,
-            (math.random() - 0.5) * 4
-        )
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     end)
 
     RagdollState.Connection = RunService.Heartbeat:Connect(function()
@@ -2127,7 +2120,7 @@ local function StartRagdoll()
             return
         end
 
-        rigRoot.Anchored = false
+        rigRoot.Anchored = true
         for _, motor in ipairs(RagdollState.Joints) do
             if motor.Enabled then
                 motor.Enabled = false
@@ -2136,8 +2129,8 @@ local function StartRagdoll()
         NeutralizeRagdollMovers(rig)
     end)
 
-    -- Stepped runs immediately before physics, so the movers stay neutral even
-    -- if the game rewrites them in a later Heartbeat handler.
+    -- Stepped runs immediately before physics, so the pin and neutral movers
+    -- survive even if the game rewrites them in a later Heartbeat handler.
     if RunService.Stepped then
         RagdollState.SteppedConnection = RunService.Stepped:Connect(function()
             local rig = RagdollState.Character
@@ -2145,7 +2138,7 @@ local function StartRagdoll()
             if not rig or not rigRoot or not rigRoot.Parent then
                 return
             end
-            rigRoot.Anchored = false
+            rigRoot.Anchored = true
             for _, motor in ipairs(RagdollState.Joints) do
                 if motor.Enabled then
                     motor.Enabled = false
@@ -3495,7 +3488,7 @@ local function BuildUI()
         tab:CreateSectionLabel("RAGDOLL CONTROLS")
         tab:CreateKeybindButton(
             "RAGDOLL",
-            "Drop into a physical ragdoll and collapse the current creature. The keybind is optional; clear it with X or click the action button.",
+            "Freeze the creature in place and drop its body into a physical ragdoll. The keybind is optional; clear it with X or click the action button.",
             {
                 Key = KeybindToEnum(Keybinds.Ragdoll),
                 Required = false,

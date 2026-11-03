@@ -35,7 +35,7 @@ The `ANIMATION` tab adds a live animation swapper:
 - Loop toggle, reset to the current creature's original animation, and catalog refresh
 - Automatic preview cleanup on species change, respawn, or script unload
 
-The same tab has `RAGDOLL` and `UNRAGDOLL` action rows. Ragdoll turns the major skeleton joints into free ball sockets so the creature goes limp and falls under gravity; unragdoll restores the original joints and stands it back up. Both rows have optional programmable keybinds, defaulting to `R` and `U`; press the adjacent `X` to clear a binding to `NONE`.
+The same tab has `RAGDOLL` and `UNRAGDOLL` action rows. Ragdoll freezes the creature where it is and turns the major skeleton joints into free ball sockets, so the body goes limp and hangs in place; unragdoll restores the original joints, stands it back up, and returns control. Both rows have optional programmable keybinds, defaulting to `R` and `U`; press the adjacent `X` to clear a binding to `NONE`.
 
 The instant-menu drop timing is fixed at 1 second and 1,111,111 studs/second. `DROP_DURATION` and `DROP_SPEED` are no longer editable controls and are not read from the config file.
 
