@@ -13,15 +13,15 @@
         and loads it automatically. Local copies are only a fallback.
 
     Library URL:
-        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=14
+        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=15
 ]================================================================]--
 
 -- // Apex Library Loader
 -- The version query bypasses executor HTTP caches that still hold the old
 -- library. LayoutRevision below rejects any stale copy that slips through.
 -- The refs/heads path avoids the stale CDN copy served for the short /main/ URL.
-local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=14"
-local MIN_LAYOUT_REVISION = 14
+local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=15"
+local MIN_LAYOUT_REVISION = 15
 
 local function IsPlusLibrary(library)
     return type(library) == "table"
