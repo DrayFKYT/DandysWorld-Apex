@@ -60,7 +60,7 @@ The interface is provided by [Apex-Gui-library](https://github.com/DrayFKYT/Apex
 https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua
 ```
 
-Both scripts download revision 12 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 12 adds the animated header fullscreen glyph, which expands the window and tab content to a centered 50% panel with only modest text growth; the mobile claw toggle stays layered above it. Revision 11 added `Tab:CreateKeybindButton` rows with optional action buttons and clear buttons; `ShowAction = false` leaves a keybind-only row.
+Both scripts download revision 13 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 13 makes fullscreen a centered panel that is 50% of the usable screen width and 70% of its height, and shows two tab panes side by side: the active tab on the left and the previously viewed tab on the right. Clicking a tab moves the old left pane to the right, and wide fullscreen panels fit more tabs before the tab bar scrolls. The window still animates between layouts and the mobile claw toggle stays layered above it. Revision 12 added the animated header fullscreen glyph; revision 11 added `Tab:CreateKeybindButton` rows with optional action buttons and clear buttons, and `ShowAction = false` leaves a keybind-only row.
 
 ## Documentation
 
