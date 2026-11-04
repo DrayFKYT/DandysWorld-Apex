@@ -797,16 +797,22 @@ do
         end
 
         local params = Nav.GetRayParams(false)
-        local side = Vector3.new(-direction.Z, 0, direction.X) * (radius or WALL_RADIUS)
+        local side = Vector3.new(-direction.Z, 0, direction.X) * ((radius or WALL_RADIUS) * 0.9)
         local shortest = distance
         local shortestNormal = nil
 
         for _, offset in ipairs(WALL_OFFSETS) do
             local shift = side * offset
             local hit = raycast(origin + shift, direction * distance, params)
-            if hit and hit.Distance < shortest then
-                shortest = hit.Distance
-                shortestNormal = hit.Normal
+            -- A side probe can start inside the wall the character is already
+            -- sliding along. That is a lateral wall, not an obstacle ahead;
+            -- counting it as a hit freezes the flight and makes it bounce
+            -- between the two sides of the wall.
+            if hit and hit.Distance and (offset == 0 or hit.Distance > 0.75) then
+                if hit.Distance < shortest then
+                    shortest = hit.Distance
+                    shortestNormal = hit.Normal
+                end
             end
         end
 
@@ -888,6 +894,9 @@ do
                 if pLength > 0.1 then
                     pX, pZ = pX / pLength, pZ / pLength
                     local parallel = math.abs(pX * normalX + pZ * normalZ)
+                    -- Commit to the established wall side until the wall is
+                    -- actually cleared. Alternating sides mid-wall is what
+                    -- makes the flight pace back and forth at the same spot.
                     if parallel < 0.5 then
                         local pDirection = Vector3.new(pX, 0, pZ)
                         local pAvailable, pClear = Nav.Probe(
@@ -1287,8 +1296,12 @@ do
         local lastProgressAt = startedAt
         local lastProgressPosition = root.Position
         local lastRepathAt = startedAt
-        local lastAvoidDirection = nil
-        local lastAvoidAt = 0
+        local detourDirection = nil
+        local lastWallContactAt = 0
+        local repathCount = 0
+        local lastMoveX, lastMoveZ = 0, 0
+        local reversalCount = 0
+        local reversalWindowAt = startedAt
 
         while sequence == currentSequence do
             character = LocalPlayer.Character
@@ -1372,6 +1385,14 @@ do
                 local moveX, moveZ = directionX, directionZ
                 local available = nil
                 if flatLength > 0.01 then
+                    -- Leave wall-following only when the whole segment back
+                    -- to the goal is clear. Checking just the next step lets
+                    -- the flight cut a corner, hit the same wall again, and
+                    -- reverse into an endless back-and-forth sweep.
+                    if detourDirection and Nav.SegmentClear(current, targetPosition) then
+                        detourDirection = nil
+                    end
+
                     local probeDistance = math.max(MAX_STEP + 3, 7)
                     local wallDirection, wallAvailable, avoiding = Nav.AvoidWalls(
                         current,
@@ -1380,24 +1401,38 @@ do
                         probeDistance,
                         cachedMonsters,
                         clearance,
-                        lastAvoidDirection
+                        detourDirection
                     )
                     if wallDirection then
                         moveX = wallDirection.X
                         moveZ = wallDirection.Z
                         available = wallAvailable
                         if avoiding then
-                            -- Remember which side of the wall we picked so a
-                            -- corner is rounded in one direction instead of
-                            -- zig-zagging between both sides.
-                            lastAvoidDirection = Vector3.new(
-                                wallDirection.X,
-                                0,
-                                wallDirection.Z
-                            )
-                            lastAvoidAt = now
-                        elseif lastAvoidDirection and now - lastAvoidAt > 1 then
-                            lastAvoidDirection = nil
+                            -- Commit to one wall-following direction until
+                            -- the wall is fully behind us. Updating this to
+                            -- every step's direction loses the commitment
+                            -- right at the corner, where the flight turns
+                            -- to face the wall again.
+                            if not detourDirection then
+                                detourDirection = Vector3.new(
+                                    wallDirection.X,
+                                    0,
+                                    wallDirection.Z
+                                )
+                            else
+                                local sameWay = detourDirection.X * wallDirection.X
+                                    + detourDirection.Z * wallDirection.Z
+                                if sameWay > 0 then
+                                    detourDirection = Vector3.new(
+                                        wallDirection.X,
+                                        0,
+                                        wallDirection.Z
+                                    )
+                                end
+                            end
+                            lastWallContactAt = now
+                        elseif detourDirection and now - lastWallContactAt > 1 then
+                            detourDirection = nil
                         end
                     else
                         moveX, moveZ = 0, 0
@@ -1434,6 +1469,35 @@ do
                         current.Z + moveZ * horizontalStep
                     ), rotation)
                 end
+
+                -- Detect a flight that is alternating direction instead of
+                -- making progress. Three sharp reversals inside a short
+                -- window is a loop, not a corner; bail out so the caller can
+                -- pick another target instead of flying back and forth.
+                local moveNow = os.clock()
+                if horizontalStep >= 0.15 then
+                    local moveLength = math.sqrt(moveX * moveX + moveZ * moveZ)
+                    if moveLength > 0.01 then
+                        local moveDirX, moveDirZ = moveX / moveLength, moveZ / moveLength
+                        if lastMoveX ~= 0 or lastMoveZ ~= 0 then
+                            local dot = moveDirX * lastMoveX + moveDirZ * lastMoveZ
+                            if dot < -0.5 then
+                                reversalCount = reversalCount + 1
+                            end
+                        end
+                        lastMoveX, lastMoveZ = moveDirX, moveDirZ
+                    end
+                else
+                    lastMoveX, lastMoveZ = 0, 0
+                end
+                if moveNow - reversalWindowAt > 2.5 then
+                    reversalCount = 0
+                    reversalWindowAt = moveNow
+                end
+                if reversalCount >= 3 then
+                    KillVelocity()
+                    return false
+                end
                 KillVelocity()
             end
 
@@ -1445,11 +1509,18 @@ do
             if (root.Position - lastProgressPosition).Magnitude >= 3 then
                 lastProgressAt = now
                 lastProgressPosition = root.Position
+                repathCount = 0
             end
 
             -- A moving monster can invalidate the static route. Rebuild once
-            -- progress stalls instead of pushing into the same corner.
+            -- progress stalls instead of pushing into the same corner. Give
+            -- the rebuild a couple of tries, then stop instead of looping on
+            -- a route the local steering cannot finish.
             if now - lastProgressAt > 2.5 and now - lastRepathAt > 1.5 then
+                repathCount = repathCount + 1
+                if repathCount > 2 then
+                    return false
+                end
                 waypoints = Nav.BuildPath(root.Position, targetPosition, { Hover = hover })
                 waypointIndex = 1
                 lastProgressAt = now
@@ -2150,6 +2221,9 @@ local Safety = {
     Height = 12,
     Speed = 70,
     TargetAt = 0,
+    GenFailures = {},
+    GenCooldown = {},
+    GenRetryCooldown = 12,
 }
 
 local function FireProximityPrompt(prompt)
@@ -2238,6 +2312,8 @@ function Safety.Reset()
     Safety.TargetAt = 0
     lockedGen = nil
     isInteracting = false
+    Safety.GenFailures = {}
+    Safety.GenCooldown = {}
     Flight.Cancel()
 end
 
@@ -2479,7 +2555,10 @@ local function AutofarmStep()
             local attach = generator:FindFirstChild("ScrapsAttachPoint", true)
             if attach and isAreaSafe(attach.Position) then
                 local connie = stats:FindFirstChild("Connie")
-                if not (connie and connie.Value == true) and not lockedGen then
+                local retryAt = Safety.GenCooldown[generator]
+                if not (connie and connie.Value == true) and not lockedGen
+                    and (not retryAt or os.clock() >= retryAt)
+                then
                     lockedGen = generator
                     break
                 end
@@ -2492,15 +2571,32 @@ local function AutofarmStep()
         if point then
             if (root.Position - point.Position).Magnitude > 5 then
                 isInteracting = false
+                local gen = lockedGen
                 local arrived = Flight.To(point.Position, {
                     Speed = Flight.FarmSpeed,
                     Clearance = 18,
                     ArriveDistance = 4,
                     Timeout = 15,
                 })
-                if Safety.Locked or not arrived then
+                if Safety.Locked then
                     return
                 end
+                if not arrived then
+                    -- Do not retry an unreachable generator every half
+                    -- second. Give it a short cooldown and try another one.
+                    local failures = (Safety.GenFailures[gen] or 0) + 1
+                    Safety.GenFailures[gen] = failures
+                    if failures >= 2 then
+                        Safety.GenFailures[gen] = nil
+                        Safety.GenCooldown[gen] = os.clock() + Safety.GenRetryCooldown
+                        if lockedGen == gen then
+                            lockedGen = nil
+                            isInteracting = false
+                        end
+                    end
+                    return
+                end
+                Safety.GenFailures[gen] = nil
                 task.wait(0.15)
             end
 
