@@ -17,9 +17,9 @@
       * Walk-Swim / Sprint / Fly speed attributes
       * CFrame Exploit Fly
       * Staff detector
-      * Out-of-bounds damage remote removal
+      * Out-of-bounds guard with automatic remote retry
       * Live animation swapper with category filters and random/cycle preview
-      * Client-side ragdoll / unragdoll with optional keybinds
+      * Client-side ragdoll toggle (unbound by default)
       * Mandatory menu keybind with no clear option
 
     Run order:
@@ -187,10 +187,10 @@ local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerName = LocalPlayer.Name
 
-local SCRIPT_VERSION = "COS // APEX 1.2"
+local SCRIPT_VERSION = "COS // APEX 1.5"
 local AUTHOR = "Drk_Duck"
 local ConfigFile = "Cos_Apex_Config.json"
-local CONFIG_VERSION = 3
+local CONFIG_VERSION = 5
 
 -- // Session guard. Re-running the script makes the old loops and callbacks
 -- stop applying effects without touching the newly-created APEX window.
@@ -199,6 +199,12 @@ local ScriptRunning = true
 local sessionRegistered = false
 if getgenv then
     sessionRegistered = pcall(function()
+        -- Remove any namecall hook left by a previous run before this copy
+        -- installs its own. This keeps re-execution from stacking guards.
+        local previousCleanup = getgenv().CosApexNamecallCleanup
+        if type(previousCleanup) == "function" then
+            pcall(previousCleanup)
+        end
         getgenv().CosApexSession = SESSION
     end)
 end
@@ -232,6 +238,12 @@ local Toggles = {
     HideScent = false,
     AlwaysAggro = false,
     AlwaysCower = false,
+    AntiWingShred = false,
+    AntiBrokenLegs = false,
+    AntiTornLigaments = false,
+    CleanseMovementDebuffs = false,
+    OOBWatchdog = true,
+    HazardImmunity = false,
     OutlineESP = false,
     ShowHealthBar = true,
     MinimapESP = false,
@@ -256,9 +268,9 @@ local DROP_DURATION = 1
 local DROP_SPEED = 1111111
 
 -- // Action keybinds owned by this script. false means "no key assigned".
+-- RagdollToggle is intentionally unbound by default; the player must bind it.
 local Keybinds = {
-    Ragdoll = "R",
-    Unragdoll = "U"
+    RagdollToggle = false
 }
 
 local ESPSettings = {
@@ -395,18 +407,14 @@ local function LoadScriptConfig()
     end
 
     if type(data.Keybinds) == "table" then
-        local ragdollKey = data.Keybinds.Ragdoll
-        if ragdollKey == false then
-            Keybinds.Ragdoll = false
-        elseif IsValidKeyName(ragdollKey) then
-            Keybinds.Ragdoll = ragdollKey
+        local ragdollToggleKey = data.Keybinds.RagdollToggle
+        if ragdollToggleKey == false then
+            Keybinds.RagdollToggle = false
+        elseif IsValidKeyName(ragdollToggleKey) then
+            Keybinds.RagdollToggle = ragdollToggleKey
         end
-        local unragdollKey = data.Keybinds.Unragdoll
-        if unragdollKey == false then
-            Keybinds.Unragdoll = false
-        elseif IsValidKeyName(unragdollKey) then
-            Keybinds.Unragdoll = unragdollKey
-        end
+        -- Legacy Ragdoll and Unragdoll keys are intentionally ignored so
+        -- players must bind the new single toggle themselves.
     end
 end
 
@@ -432,8 +440,7 @@ local function SaveScriptConfig()
                 MaxDistance = ESPSettings.MaxDistance
             },
             Keybinds = {
-                Ragdoll = Keybinds.Ragdoll,
-                Unragdoll = Keybinds.Unragdoll
+                RagdollToggle = Keybinds.RagdollToggle
             },
             Colors = {}
         }
@@ -502,18 +509,21 @@ local function FireAilment(ailmentName)
     return FireRemote("StateAilment", ailmentName)
 end
 
--- // Out-of-bounds damage remote. The original script destroyed this remote
--- unconditionally on load, so this build does the same and reports the state.
+-- // Out-of-bounds guard. The original script destroyed the damage remote
+-- once at load, but the game caches remote wrappers, so destroying the
+-- instance alone does not stop an already-cached reference from firing.
+-- The watchdog combines three layers:
+--   1. destroy the remote whenever it reappears (kept for compatibility),
+--   2. block FireServer on any cached remote with the OOB/self-despawn name,
+--   3. clear the local OutOfBounds ailment so health regen is restored.
 local OOBRemoved = false
 
 local function TryRemoveOutOfBoundsDamage()
-    if OOBRemoved then
-        return true
-    end
     local remotes = GetRemotesFolder()
     local remote = remotes and remotes:FindFirstChild("OutOfBoundsSelfDamage")
     if not remote then
-        return false
+        OOBRemoved = true
+        return true
     end
     pcall(function()
         remote:Destroy()
@@ -1585,6 +1595,597 @@ local function CountAnimationTracks(character)
     return count
 end
 
+-- // Control-ailment blocker. This list is deliberately curated: it only
+-- contains debuffs whose movement/jump/fly/takeoff/control effects are all
+-- driven by client-side ailment reads, so hiding the ailment from those reads
+-- blocks it without deleting the server-owned attribute. Sleep and Drowsy are
+-- not included because their sleep trigger and critical-hit effect are
+-- applied on the server and cannot be fully blocked this way.
+-- Protective or event states (Cocooned, FlashFreeze, ReapersTransformation,
+-- CardMatcher, PillarAttacker) are intentionally excluded so minigames and
+-- damage-immunity states still work.
+--
+-- The block below is scoped and exports one table so the main chunk stays
+-- under Luau's 200-local register limit.
+local Safety = {}
+
+do
+local function GetLocalAilmentsFolder()
+    local character = LocalPlayer.Character
+    local folder = character and character:FindFirstChild("Ailments")
+    if folder then
+        return folder
+    end
+    local charactersFolder = Workspace:FindFirstChild("Characters")
+    local model = charactersFolder and charactersFolder:FindFirstChild(PlayerName)
+    return model and model:FindFirstChild("Ailments") or nil
+end
+
+local function ClearAilmentAttribute(ailments, name)
+    if not ailments then
+        return false
+    end
+    -- Used only by the OutOfBounds watchdog. The cleanse toggles never clear
+    -- server-owned ailments; they block reads instead.
+    pcall(function()
+        ailments:SetAttribute(name, nil)
+    end)
+    return true
+end
+
+-- // These tables drive the read filter in the namecall hook. The cheat never
+-- deletes or clears the server-owned ailment; it hides the ailment from the
+-- client's reads so the game cannot apply its effects. Speed is computed from
+-- CharacterData:GetWithModifiers(), which reads Ailments:GetAttributes() every
+-- time it recalculates, and the jump/flight/pose gates use HasAilment() and
+-- AilmentCheck(), which read Ailments:GetAttribute(). Filtering both closes
+-- the window where a server update briefly reapplies the debuff.
+local WING_BLOCK_AILMENTS = {
+    ShreddedWings = true,
+    Shock = true,
+    Freeze = true,
+    StickyTar = true,
+    StickyTrap = true,
+    Snow = true,
+    Rain = true,
+    Thunderstorm = true,
+    Monsoon = true
+}
+
+local LEG_BLOCK_AILMENTS = {
+    DisableSpacebar = true,
+    Freeze = true,
+    Shock = true,
+    StickyTar = true,
+    StickyTrap = true
+}
+
+local LIGAMENT_AILMENTS = {
+    TornLigaments = true
+}
+
+local MOVEMENT_AILMENTS = {
+    -- Speed debuffs
+    Injury = true,
+    Slowed = true,
+    Chilled = true,
+    Gale = true,
+    StolenSpeed = true,
+    Inked = true,
+    TangledKelp = true,
+    -- Tar / trap
+    StickyTar = true,
+    StickyTrap = true,
+    -- Control / incapacitate
+    Freeze = true,
+    Shock = true,
+    ShreddedWings = true,
+    DisableSpacebar = true,
+    TornLigaments = true,
+    Confusion = true,
+    DazzlingFlash = true,
+    Necropoison = true,
+    -- Sleep and Drowsy are intentionally excluded. Sleep's critical-hit
+    -- vulnerability and Drowsy's 10-stack sleep trigger are applied on the
+    -- server, so client read filtering cannot fully block them. Removing the
+    -- ailment from this list is safer than leaving a partial block.
+    -- Weather takeoff penalties
+    Snow = true,
+    Rain = true,
+    Thunderstorm = true,
+    Monsoon = true
+}
+
+local function ShouldHideAilment(name)
+    if type(name) ~= "string" then
+        return false
+    end
+    if Toggles.AntiWingShred and WING_BLOCK_AILMENTS[name] then
+        return true
+    end
+    if Toggles.AntiBrokenLegs and LEG_BLOCK_AILMENTS[name] then
+        return true
+    end
+    if Toggles.AntiTornLigaments and LIGAMENT_AILMENTS[name] then
+        return true
+    end
+    if Toggles.CleanseMovementDebuffs and MOVEMENT_AILMENTS[name] then
+        return true
+    end
+    return false
+end
+
+local function EnforceMovementCleanse()
+    -- Do not clear attributes here. The server owns the ailment and the cheat
+    -- only hides its effects from the client; the folder is refreshed so the
+    -- namecall guard always targets the current character's Ailments folder.
+    Safety.AilmentsFolder = GetLocalAilmentsFolder()
+end
+
+local function EnforceOOBWatchdog()
+    if not Toggles.OOBWatchdog then
+        return
+    end
+    ClearAilmentAttribute(GetLocalAilmentsFolder(), "OutOfBounds")
+end
+
+-- // Namecall guard. The game caches remote wrappers, so a destroyed remote
+-- can still be fired through an old reference. Blocking by the instance name
+-- catches cached and recreated remotes. AdjustSpeed is routed through the
+-- indexed method because forwarding it to the old handler can silently fail
+-- in this executor.
+-- // Environment self-damage remotes. The character script reports these when
+-- the creature touches a hazard, and the server applies the damage in
+-- response. Dropping the call here prevents that damage without touching
+-- combat, ability, NPC, or player damage, which use separate remotes.
+local HAZARD_DAMAGE_REMOTES = {
+    AcidSelfDamage = true,
+    AreaWindBlastDamage = true,
+    AvalancheSelfDamage = true,
+    CorruptedGrowthsDamage = true,
+    CorruptionSelfDamage = true,
+    DrownRemote = true,
+    FirenadoSelfDamage = true,
+    GenericSelfDamage = true,
+    GeyserSelfDamage = true,
+    HeartstormLightningSelfDamage = true,
+    HeatwaveSelfDamage = true,
+    HurricaneSelfDamage = true,
+    IceSpikesSelfDamage = true,
+    LavaSelfDamage = true,
+    LightningSelfDamage = true,
+    MeteorFlySelfDamage = true,
+    MeteorSelfDamage = true,
+    SnowPileSelfDamage = true,
+    TornadoSelfDamage = true,
+    WillToLiveSelfDamage = true
+}
+
+-- // The game does not fire these remotes through __namecall. RemoteUtils
+-- wraps each RemoteEvent in a plain table whose __index returns a closure
+-- that calls the underlying remote with an indexed method call, which
+-- bypasses a __namecall hook. Guard the wrapper tables directly, then patch
+-- RemoteUtils so wrappers created later (respawn, module load) are guarded
+-- too. The wrapper keeps its original FireServer closure and consults the
+-- toggle on every call, so turning Hazard Immunity or the OOB watchdog off
+-- restores normal firing without reloading the script.
+local function GetGuardedRemoteKind(name)
+    if name == "OutOfBoundsSelfDamage" or name == "SelfDespawn" then
+        return "oob"
+    end
+    if HAZARD_DAMAGE_REMOTES[name] then
+        return "hazard"
+    end
+    -- The game adds new hazard remotes over time (TarPitSelfDamage,
+    -- HostileThornSelfDamage, HardcoreHurricaneSelfDamage, and others).
+    -- Every client-reported environmental self-damage remote ends in
+    -- "SelfDamage", so match the suffix instead of relying only on the
+    -- static list above. Non-self damage remotes (NPCDamageRemote,
+    -- StickyTrapDamageRemote, StarMetalDamageRemote, ...) do not match.
+    if type(name) == "string" and #name >= 10 and string.sub(name, -10) == "SelfDamage" then
+        return "hazard"
+    end
+    return nil
+end
+
+-- Weak-keyed so the script does not keep dead wrappers alive. Cleanup uses
+-- this list to remove the raw FireServer/InvokeServer overrides and restore
+-- the module functions if this script is unloaded or replaced.
+local GuardedWrapperList = setmetatable({}, { __mode = "k" })
+
+local function ShouldBlockGuardedRemote(name)
+    local kind = GetGuardedRemoteKind(name)
+    if kind == "oob" then
+        return Toggles.OOBWatchdog == true
+    end
+    return kind == "hazard" and Toggles.HazardImmunity == true
+end
+
+local function CountBlockedGuardedRemote(name)
+    if GetGuardedRemoteKind(name) == "oob" then
+        Safety.OOBBlockedCalls = (Safety.OOBBlockedCalls or 0) + 1
+    else
+        Safety.HazardBlockedCalls = (Safety.HazardBlockedCalls or 0) + 1
+    end
+end
+
+local function GuardRemoteWrapper(wrapper)
+    if typeof(wrapper) ~= "table" then
+        return wrapper
+    end
+    local okName, name = pcall(function()
+        return wrapper.Name
+    end)
+    if not okName or type(name) ~= "string" or not GetGuardedRemoteKind(name) then
+        return wrapper
+    end
+
+    local mt = getmetatable(wrapper)
+    if type(mt) ~= "table" or type(mt.__index) ~= "function" then
+        return wrapper
+    end
+
+    local okClass, className = pcall(function()
+        return wrapper.ClassName
+    end)
+    local isRemoteFunction = okClass and className == "RemoteFunction"
+
+    local record = GuardedWrapperList[wrapper]
+    if not record then
+        record = {}
+        GuardedWrapperList[wrapper] = record
+    end
+
+    -- Read the original closure from the metatable instead of wrapper.FireServer.
+    -- That bypasses any guard left by an older run of this script, so reloads
+    -- always replace stale toggles instead of silently forwarding to them.
+    if not isRemoteFunction and (record.FireServer == nil or record.FireServer ~= rawget(wrapper, "FireServer")) then
+        local okFire, originalFire = pcall(mt.__index, wrapper, "FireServer")
+        if okFire and type(originalFire) == "function" then
+            local blockedFire = function(_, ...)
+                if ShouldBlockGuardedRemote(name) then
+                    CountBlockedGuardedRemote(name)
+                    return nil
+                end
+                return originalFire(wrapper, ...)
+            end
+            rawset(wrapper, "FireServer", blockedFire)
+            record.FireServer = blockedFire
+            Safety.GuardedWrappers = (Safety.GuardedWrappers or 0) + 1
+        end
+    end
+
+    if isRemoteFunction and (record.InvokeServer == nil or record.InvokeServer ~= rawget(wrapper, "InvokeServer")) then
+        local okInvoke, originalInvoke = pcall(mt.__index, wrapper, "InvokeServer")
+        if okInvoke and type(originalInvoke) == "function" then
+            local blockedInvoke = function(_, ...)
+                if ShouldBlockGuardedRemote(name) then
+                    CountBlockedGuardedRemote(name)
+                    return nil
+                end
+                return originalInvoke(wrapper, ...)
+            end
+            rawset(wrapper, "InvokeServer", blockedInvoke)
+            record.InvokeServer = blockedInvoke
+        end
+    end
+    return wrapper
+end
+
+local function IsRemoteWrapper(obj)
+    if typeof(obj) ~= "table" then
+        return false
+    end
+    if type(rawget(obj, "Destroy")) ~= "function" then
+        return false
+    end
+    local mt = getmetatable(obj)
+    return type(mt) == "table"
+        and type(mt.__index) == "function"
+        and type(mt.__newindex) == "function"
+end
+
+local function GuardExistingRemoteWrappers()
+    if type(getgc) ~= "function" then
+        return 0
+    end
+    local guarded = 0
+    for _, obj in ipairs(getgc(true)) do
+        if IsRemoteWrapper(obj) then
+            local okName, name = pcall(function()
+                return obj.Name
+            end)
+            if okName and type(name) == "string" and GetGuardedRemoteKind(name) then
+                GuardRemoteWrapper(obj)
+                guarded = guarded + 1
+            end
+        end
+    end
+    return guarded
+end
+
+local function FindRemoteUtilsModule()
+    if type(getgc) ~= "function" then
+        return nil
+    end
+    for _, obj in ipairs(getgc(true)) do
+        if typeof(obj) == "table"
+            and type(rawget(obj, "GetRemoteEvent")) == "function"
+            and type(rawget(obj, "GetRemoteFunction")) == "function"
+            and type(rawget(obj, "GetUnreliableRemoteEvent")) == "function"
+            and type(rawget(obj, "SetRemoteCallback")) == "function"
+            and type(rawget(obj, "ClearRemoteCallbacks")) == "function" then
+            return obj
+        end
+    end
+    return nil
+end
+
+local RemoteUtilsModule = nil
+local RemoteUtilsPatched = {}
+local function PatchRemoteUtils()
+    if not RemoteUtilsModule then
+        RemoteUtilsModule = FindRemoteUtilsModule()
+    end
+    if not RemoteUtilsModule then
+        return false
+    end
+    for _, methodName in ipairs({ "GetRemoteEvent", "GetRemoteFunction", "GetUnreliableRemoteEvent" }) do
+        local current = rawget(RemoteUtilsModule, methodName)
+        local entry = RemoteUtilsPatched[methodName]
+        if type(current) == "function" and (not entry or entry.wrapped ~= current) then
+            local wrapped = function(...)
+                return GuardRemoteWrapper(current(...))
+            end
+            rawset(RemoteUtilsModule, methodName, wrapped)
+            RemoteUtilsPatched[methodName] = { original = current, wrapped = wrapped }
+        end
+    end
+    return true
+end
+
+local function UnpatchRemoteUtils()
+    local module = RemoteUtilsModule
+    if module then
+        for methodName, entry in pairs(RemoteUtilsPatched) do
+            if rawget(module, methodName) == entry.wrapped then
+                pcall(function()
+                    rawset(module, methodName, entry.original)
+                end)
+            end
+        end
+    end
+    RemoteUtilsPatched = {}
+end
+
+local function UnguardRemoteWrappers()
+    for wrapper, record in pairs(GuardedWrapperList) do
+        pcall(function()
+            if record.FireServer ~= nil and rawget(wrapper, "FireServer") == record.FireServer then
+                rawset(wrapper, "FireServer", nil)
+            end
+            if record.InvokeServer ~= nil and rawget(wrapper, "InvokeServer") == record.InvokeServer then
+                rawset(wrapper, "InvokeServer", nil)
+            end
+        end)
+    end
+    GuardedWrapperList = setmetatable({}, { __mode = "k" })
+end
+
+local function CleanupInstalledGuards()
+    UnpatchRemoteUtils()
+    UnguardRemoteWrappers()
+    if Safety.RemoveNamecallHook then
+        pcall(Safety.RemoveNamecallHook)
+    end
+end
+
+local NamecallHookInstalled = false
+local NamecallHookActive = false
+local OriginalNamecall = nil
+local NamecallWrapper = nil
+
+local function ProtectNamecall(fn)
+    if type(newcclosure) == "function" then
+        local ok, wrapped = pcall(newcclosure, fn)
+        if ok then
+            return wrapped
+        end
+    end
+    return fn
+end
+
+local function InstallNamecallHook()
+    if NamecallHookInstalled then
+        return true
+    end
+    if type(getnamecallmethod) ~= "function" then
+        return false
+    end
+
+    NamecallWrapper = ProtectNamecall(function(self, ...)
+        if not NamecallHookActive then
+            -- If this wrapper is left in the chain because another hook is
+            -- layered above it, still route AdjustSpeed through the indexed
+            -- method. Direct forwarding to the old handler does not apply
+            -- AdjustSpeed in this executor.
+            if getnamecallmethod() == "AdjustSpeed" then
+                local adjust = self.AdjustSpeed
+                if type(adjust) == "function" then
+                    return adjust(self, ...)
+                end
+            end
+            return OriginalNamecall(self, ...)
+        end
+
+        local method = getnamecallmethod()
+
+        -- // Advanced cleanse: hide blocked ailments from the client instead
+        -- of only deleting the attributes. The game reads Ailments through
+        -- GetAttribute for the jump/flight gate and GetAttributes for the
+        -- speed modifier calculation, so filtering both closes the window
+        -- where a server re-add briefly reapplies the debuff.
+        if method == "GetAttribute" or method == "GetAttributes" then
+            local folder = Safety.AilmentsFolder
+            if folder and self == folder then
+                if method == "GetAttribute" then
+                    local name = ...
+                    if ShouldHideAilment(name) then
+                        Safety.CleanseBlockedReads = (Safety.CleanseBlockedReads or 0) + 1
+                        return nil
+                    end
+                else
+                    local attrs = OriginalNamecall(self, ...)
+                    if type(attrs) == "table" then
+                        local filtered = {}
+                        for name, value in pairs(attrs) do
+                            if ShouldHideAilment(name) then
+                                Safety.CleanseBlockedReads = (Safety.CleanseBlockedReads or 0) + 1
+                            else
+                                filtered[name] = value
+                            end
+                        end
+                        return filtered
+                    end
+                    return attrs
+                end
+            end
+        end
+
+        if method == "AdjustSpeed" then
+            -- Use the ClassName property here. Calling :IsA inside a
+            -- __namecall hook clobbers the active namecall method, which
+            -- makes forwarding to the original handler a silent no-op.
+            -- Avoid pcall in this path as well; it can reset the executor's
+            -- per-call namecall state before forwarding.
+            local isTrack = typeof(self) == "Instance" and self.ClassName == "AnimationTrack"
+            if isTrack then
+                -- Direct method invocation. Forwarding to the old __namecall
+                -- handler does not apply AdjustSpeed in this executor, so it
+                -- must go through the indexed method.
+                local adjust = self.AdjustSpeed
+                if type(adjust) == "function" then
+                    return adjust(self, ...)
+                end
+                return OriginalNamecall(self, ...)
+            end
+        end
+
+        if method == "FireServer" or method == "InvokeServer" then
+            local name = typeof(self) == "Instance" and self.Name or nil
+            if name then
+                if Toggles.OOBWatchdog and (name == "OutOfBoundsSelfDamage" or name == "SelfDespawn") then
+                    Safety.OOBBlockedCalls = (Safety.OOBBlockedCalls or 0) + 1
+                    return nil
+                end
+                if Toggles.HazardImmunity and HAZARD_DAMAGE_REMOTES[name] then
+                    Safety.HazardBlockedCalls = (Safety.HazardBlockedCalls or 0) + 1
+                    return nil
+                end
+            end
+        end
+
+        return OriginalNamecall(self, ...)
+    end)
+
+    -- Use the raw metatable only. In this executor hookmetamethod returns a
+    -- function but does not actually install the hook, so calling it first
+    -- silently prevents the fallback and leaves the hook uninstalled.
+    if type(getrawmetatable) ~= "function" then
+        NamecallWrapper = nil
+        return false
+    end
+
+    local ok, mt = pcall(getrawmetatable, game)
+    if not ok or not mt or type(mt.__namecall) ~= "function" then
+        NamecallWrapper = nil
+        return false
+    end
+
+    local original = mt.__namecall
+    OriginalNamecall = original
+
+    local readonlyOk = pcall(setreadonly, mt, false)
+    mt.__namecall = NamecallWrapper
+    if readonlyOk then
+        pcall(setreadonly, mt, true)
+    end
+
+    if mt.__namecall ~= NamecallWrapper then
+        OriginalNamecall = nil
+        NamecallWrapper = nil
+        return false
+    end
+
+    NamecallHookInstalled = true
+    return true
+end
+
+local function RemoveNamecallHook()
+    NamecallHookActive = false
+    if not NamecallHookInstalled or not NamecallWrapper then
+        return
+    end
+    if type(getrawmetatable) ~= "function" then
+        return
+    end
+    local ok, mt = pcall(getrawmetatable, game)
+    if not ok or not mt or mt.__namecall ~= NamecallWrapper then
+        -- Another hook is layered above ours. Leave the wrapper in place as a
+        -- pass-through instead of breaking that hook's chain.
+        return
+    end
+    local readonlyOk = pcall(setreadonly, mt, false)
+    mt.__namecall = OriginalNamecall
+    if readonlyOk then
+        pcall(setreadonly, mt, true)
+    end
+    NamecallHookInstalled = false
+    OriginalNamecall = nil
+    NamecallWrapper = nil
+end
+
+local function RefreshNamecallHook()
+    NamecallHookActive = Toggles.OOBWatchdog == true
+        or Toggles.HazardImmunity == true
+        or Toggles.AntiWingShred == true
+        or Toggles.AntiBrokenLegs == true
+        or Toggles.AntiTornLigaments == true
+        or Toggles.CleanseMovementDebuffs == true
+    if NamecallHookActive then
+        InstallNamecallHook()
+    else
+        RemoveNamecallHook()
+    end
+end
+
+-- Install the OOB guard immediately because it defaults to on.
+RefreshNamecallHook()
+
+-- Guard the RemoteUtils wrapper path immediately as well. The namecall hook
+-- alone cannot see the game's self-damage fires because RemoteUtils calls the
+-- remote with an indexed method instead of a namecall.
+PatchRemoteUtils()
+GuardExistingRemoteWrappers()
+
+Safety.EnforceMovementCleanse = EnforceMovementCleanse
+Safety.EnforceOOBWatchdog = EnforceOOBWatchdog
+Safety.RefreshNamecallHook = RefreshNamecallHook
+Safety.ShouldHideAilment = ShouldHideAilment
+Safety.AilmentsFolder = nil
+Safety.RemoveNamecallHook = RemoveNamecallHook
+Safety.PatchRemoteUtils = PatchRemoteUtils
+Safety.GuardExistingRemoteWrappers = GuardExistingRemoteWrappers
+Safety.UnpatchRemoteUtils = UnpatchRemoteUtils
+Safety.UnguardRemoteWrappers = UnguardRemoteWrappers
+Safety.CleanupInstalledGuards = CleanupInstalledGuards
+if getgenv then
+    pcall(function()
+        getgenv().CosApexNamecallCleanup = CleanupInstalledGuards
+    end)
+end
+end
+
 local function GetAnimationCatalogRoot()
     local storage = ReplicatedStorage:FindFirstChild("Storage")
     local creatures = storage and storage:FindFirstChild("Creatures")
@@ -2177,8 +2778,8 @@ end
 -- whole model becomes a real physics body. The game's movers are detached so
 -- it cannot drive the character, collisions are enabled on the visible parts,
 -- and the root is left unanchored so gravity and momentum can roll the body
--- around the map. Nothing rotates the model by hand. UNRAGDOLL restores the
--- movers, collisions, and animations, then stands the creature back up.
+-- around the map. Nothing rotates the model by hand. Toggling again restores
+-- the movers, collisions, and animations, then stands the creature back up.
 local RAGDOLL_COLLISION_TRANSPARENCY = 0.9
 local RAGDOLL_TOPPLE_SPEED = 2.5
 local RAGDOLL_MAX_MOMENTUM = 90
@@ -2654,7 +3255,7 @@ local function StopRagdoll(silent)
         ClearFakeAnimationState(character)
         -- BodyGyro.MaxTorque is only configured when the character is built;
         -- the controller does not rewrite it. Restoring it is what stops the
-        -- "I can walk but I still roll" limbo after UNRAGDOLL.
+        -- "I can walk but I still roll" limbo after toggling ragdoll off.
         pcall(function()
             if character.BodyGyro then
                 local torque = character.BodyGyro.MaxTorque
@@ -3079,7 +3680,22 @@ local function UpdateStatusCards(force)
         StatusCards.Nearby:SetValue(tostring(CountNearbyCreatures()))
     end
     if StatusCards.OOB then
-        StatusCards.OOB:SetValue(OOBRemoved and "REMOVED" or "PRESENT")
+        local oobText
+        if Toggles.OOBWatchdog then
+            local blocked = Safety.OOBBlockedCalls or 0
+            oobText = blocked > 0 and ("GUARDED " .. tostring(blocked)) or "WATCHDOG"
+        else
+            oobText = OOBRemoved and "REMOVED" or "PRESENT"
+        end
+        StatusCards.OOB:SetValue(oobText)
+    end
+    if StatusCards.Hazard then
+        if Toggles.HazardImmunity then
+            local blocked = Safety.HazardBlockedCalls or 0
+            StatusCards.Hazard:SetValue(blocked > 0 and ("IMMUNE " .. tostring(blocked)) or "IMMUNE")
+        else
+            StatusCards.Hazard:SetValue("OFF")
+        end
     end
     if StatusCards.Staff then
         StatusCards.Staff:SetValue(StaffKickIssued and "TRIGGERED" or "ARMED")
@@ -3108,6 +3724,7 @@ CleanupSession = function()
     pcall(RestoreMinimap)
     pcall(ClearESP)
     pcall(RestoreHUDVisibility)
+    pcall(Safety.CleanupInstalledGuards)
     pcall(function()
         StopRagdoll(true)
     end)
@@ -3133,6 +3750,9 @@ CleanupSession = function()
         pcall(function()
             if getgenv().CosApexSession == SESSION then
                 getgenv().CosApexSession = nil
+            end
+            if getgenv().CosApexNamecallCleanup == Safety.CleanupInstalledGuards then
+                getgenv().CosApexNamecallCleanup = nil
             end
         end)
     end
@@ -3183,6 +3803,21 @@ if LocalPlayer.CharacterAdded then
         ANIMATION_CURRENT_SPECIES = nil
         pcall(RestoreOriginalAnimations)
         UpdateAnimationStatus(true)
+        -- Rebuild-wrappers guard: COS constructs its RemoteUtils wrappers for
+        -- the new character shortly after CharacterAdded. Re-scan twice so a
+        -- newly spawned creature cannot touch a hazard before the 5s sweep.
+        task.delay(0.5, function()
+            if ScriptRunning then
+                Safety.PatchRemoteUtils()
+                Safety.GuardExistingRemoteWrappers()
+            end
+        end)
+        task.delay(2, function()
+            if ScriptRunning then
+                Safety.PatchRemoteUtils()
+                Safety.GuardExistingRemoteWrappers()
+            end
+        end)
     end))
 end
 
@@ -3233,6 +3868,30 @@ TrackConnection(RunService.Heartbeat:Connect(function()
         EnforceClimber(localData)
         EnforceAttributes(localData)
     end
+
+    if now >= (Safety.NextSafetyTick or 0) then
+        Safety.NextSafetyTick = now + 0.1
+        Safety.RefreshNamecallHook()
+        Safety.EnforceMovementCleanse()
+        Safety.EnforceOOBWatchdog()
+        if Toggles.OOBWatchdog then
+            Safety.OOBSweepCounter = (Safety.OOBSweepCounter or 0) + 1
+            if Safety.OOBSweepCounter >= 10 then
+                Safety.OOBSweepCounter = 0
+                TryRemoveOutOfBoundsDamage()
+            end
+        end
+    end
+
+    -- RemoteUtils creates a fresh wrapper table each time a remote is
+    -- requested (respawn, new module). Re-scan at a low frequency so those
+    -- wrappers stay guarded even if the module could not be patched.
+    if now >= (Safety.NextRemoteGuardTick or 0) then
+        Safety.NextRemoteGuardTick = now + 5
+        Safety.PatchRemoteUtils()
+        Safety.GuardExistingRemoteWrappers()
+    end
+
     UpdateESP()
     if Toggles.InfiniteOxygen or Toggles.InfiniteMoisture then
         EnforceHUDVisibility()
@@ -3335,7 +3994,7 @@ local function BuildUI()
     ApexVersion = ApexVersion:gsub("^APEX_SYS%s*", "")
 
     MyWindow = ApexLibrary.new({
-        Title = "Creatures of Sonaria // Menu",
+        Title = "Creatures of Sonaria // Lunaris HUB",
         BrandText = AUTHOR .. " // " .. ApexVersion,
         StatusText = "BOOTING",
         AccentColor = Color3.fromRGB(255, 85, 0),
@@ -3366,13 +4025,14 @@ local function BuildUI()
 
         tab:CreateSectionLabel("LIVE STATUS")
         StatusCards.Nearby = tab:CreateInfoCard("NEARBY_CREATURES", "0")
-        StatusCards.OOB = tab:CreateInfoCard("OOB_DAMAGE_REMOTE", OOBRemoved and "REMOVED" or "PRESENT")
+        StatusCards.OOB = tab:CreateInfoCard("OOB_GUARD", Toggles.OOBWatchdog and "WATCHDOG" or (OOBRemoved and "REMOVED" or "PRESENT"))
+        StatusCards.Hazard = tab:CreateInfoCard("HAZARD_GUARD", Toggles.HazardImmunity and "IMMUNE" or "OFF")
         StatusCards.Staff = tab:CreateInfoCard("STAFF_GUARD", "ARMED")
 
         tab:CreateReadMeCard(
             "QUICK NOTES",
-            "OOB removal happens immediately on load. The staff guard is always on and kicks when a configured staff permission is detected. Use CONFIG to change the shared APEX accent and hide key.",
-            88
+            "The OOB watchdog runs continuously and blocks cached damage/despawn remotes while clearing the OutOfBounds ailment. The staff guard is always on and kicks when a configured staff permission is detected. Use CONFIG to change the shared APEX accent and hide key.",
+            96
         )
     end)
 
@@ -3588,14 +4248,78 @@ local function BuildUI()
             end
         )
 
+        tab:CreateSectionLabel("SELF AILMENT")
+        tab:CreateButton(
+            "SELF_POISON",
+            "Fire SelfAilment with Poison. The server accepts Poison, so this is useful for testing ailment interactions and recovery timing. It does not progress Burn, Bleed, or Shock recovery missions.",
+            function()
+                local ok = FireRemote("SelfAilment", "Poison")
+                SafeSetStatus(ok and "SELF_POISON" or "SELF_POISON_FAILED")
+            end
+        )
+
+        tab:CreateSectionLabel("CONTROL CLEANSE")
+        tab:CreateToggle(
+            "ANTI_WING_SHRED",
+            "Hide ShreddedWings, Shock, Freeze, StickyTar/StickyTrap, and weather takeoff penalties from the client's ailment reads so flight and takeoff stay enabled even while the server keeps the ailment.",
+            Toggles.AntiWingShred,
+            BindToggle("AntiWingShred", function()
+                Safety.RefreshNamecallHook()
+            end)
+        )
+        tab:CreateToggle(
+            "ANTI_BROKEN_LEGS",
+            "Hide DisableSpacebar (shown as BrokenLegs), Freeze, Shock, StickyTar, and StickyTrap from the client's ailment reads so jump and fly input stays enabled.",
+            Toggles.AntiBrokenLegs,
+            BindToggle("AntiBrokenLegs", function()
+                Safety.RefreshNamecallHook()
+            end)
+        )
+        tab:CreateToggle(
+            "ANTI_TORN_LIGAMENTS",
+            "Hide TornLigaments from the client's ailment reads so walk speed and stamina regeneration are not reduced.",
+            Toggles.AntiTornLigaments,
+            BindToggle("AntiTornLigaments", function()
+                Safety.RefreshNamecallHook()
+            end)
+        )
+        tab:CreateToggle(
+            "CLEANSE_MOVEMENT_DEBUFFS",
+            "Block the effects of every curated movement/control debuff by hiding it from the client's ailment reads while the server keeps it active: StickyTrap, StickyTar, Injury, Slowed, Chilled, Gale, StolenSpeed, Inked, TangledKelp, Freeze, Shock, ShreddedWings, DisableSpacebar, TornLigaments, Confusion, DazzlingFlash, Necropoison, and weather takeoff penalties. Nothing is deleted. Sleep and Drowsy are excluded because their sleep trigger and critical-hit effect are server-side and cannot be fully blocked.",
+            Toggles.CleanseMovementDebuffs,
+            BindToggle("CleanseMovementDebuffs", function()
+                Safety.RefreshNamecallHook()
+            end)
+        )
+
         tab:CreateSectionLabel("WORLD SAFETY")
+        tab:CreateToggle(
+            "OOB_WATCHDOG",
+            "Block OutOfBoundsSelfDamage and SelfDespawn on both the direct FireServer path and the RemoteUtils wrapper path, clear the OutOfBounds ailment, and retry the remote removal automatically. This is the continuous replacement for the old one-shot removal.",
+            Toggles.OOBWatchdog,
+            BindToggle("OOBWatchdog", function(state)
+                Safety.RefreshNamecallHook()
+                UpdateStatusCards(true)
+                SafeSetStatus(state and "OOB_WATCHDOG" or "OOB_OFF")
+            end)
+        )
+        tab:CreateToggle(
+            "HAZARD_IMMUNITY",
+            "Block client-reported environmental self-damage calls before they reach the server: lava, acid, corruption, heatwave, snow piles, drowning, tar pits, hostile thorns, tornadoes, hurricanes, lightning, meteors, wind blasts, and any other hazard remote ending in SelfDamage. This covers both direct FireServer calls and the RemoteUtils wrapper path the game actually uses. Combat, ability, NPC, and player damage use separate remotes and are unaffected.",
+            Toggles.HazardImmunity,
+            BindToggle("HazardImmunity", function(state)
+                Safety.RefreshNamecallHook()
+                UpdateStatusCards(true)
+                SafeSetStatus(state and "HAZARD_IMMUNITY_ON" or "HAZARD_IMMUNITY_OFF")
+            end)
+        )
         tab:CreateButton(
             "RETRY_OOB_REMOVAL",
-            "Try again if the OutOfBoundsSelfDamage remote was not present at load.",
+            "Run the OOB check now if the remote was not present when the watchdog started.",
             function()
                 TryRemoveOutOfBoundsDamage()
                 UpdateStatusCards(true)
-                SafeSetStatus(OOBRemoved and "OOB_REMOVED" or "OOB_PENDING")
+                SafeSetStatus(Toggles.OOBWatchdog and "OOB_WATCHDOG" or (OOBRemoved and "OOB_REMOVED" or "OOB_PENDING"))
             end
         )
         tab:CreateReadMeCard(
@@ -4451,33 +5175,21 @@ local function BuildUI()
 
         tab:CreateSectionLabel("RAGDOLL CONTROLS")
         tab:CreateKeybindButton(
-            "RAGDOLL",
-            "Switch the creature to its idle pose and let gravity tumble the unanchored body with real physics. Movement control stays disabled until UNRAGDOLL. The keybind is optional; clear it with X or click the action button.",
+            "RAGDOLL TOGGLE",
+            "Toggle ragdoll on or off. While ragdolled the creature uses its idle pose and real physics; toggle again to stand up and restore control. Unbound by default: click the key chip to assign a key, or use the TOGGLE button.",
             {
-                Key = KeybindToEnum(Keybinds.Ragdoll),
+                Key = KeybindToEnum(Keybinds.RagdollToggle),
                 Required = false,
-                ActionText = "RAGDOLL",
+                ActionText = "TOGGLE",
                 OnActivated = function()
-                    StartRagdoll()
+                    if RagdollState.Active then
+                        StopRagdoll(false)
+                    else
+                        StartRagdoll()
+                    end
                 end,
                 OnKeyChanged = function(key)
-                    Keybinds.Ragdoll = KeyToName(key)
-                    SaveScriptConfig()
-                end
-            }
-        )
-        tab:CreateKeybindButton(
-            "UNRAGDOLL",
-            "Stand the creature back up, restore its animations and collisions, and return control to COS.",
-            {
-                Key = KeybindToEnum(Keybinds.Unragdoll),
-                Required = false,
-                ActionText = "RESTORE",
-                OnActivated = function()
-                    StopRagdoll(false)
-                end,
-                OnKeyChanged = function(key)
-                    Keybinds.Unragdoll = KeyToName(key)
+                    Keybinds.RagdollToggle = KeyToName(key)
                     SaveScriptConfig()
                 end
             }
@@ -4581,21 +5293,7 @@ if Toggles.MinimapESP then
 end
 
 TryRemoveOutOfBoundsDamage()
-if not OOBRemoved then
-    task.spawn(function()
-        for _ = 1, 20 do
-            if not SessionActive() or OOBRemoved then
-                break
-            end
-            task.wait(0.5)
-            TryRemoveOutOfBoundsDamage()
-            if OOBRemoved then
-                UpdateStatusCards(true)
-                break
-            end
-        end
-    end)
-end
+Safety.RefreshNamecallHook()
 
 StartPulseLoop()
 
