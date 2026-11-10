@@ -13,15 +13,15 @@
         and loads it automatically. Local copies are only a fallback.
 
     Library URL:
-        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=16
+        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=17
 ]================================================================]--
 
 -- // Apex Library Loader
 -- The version query bypasses executor HTTP caches that still hold the old
 -- library. LayoutRevision below rejects any stale copy that slips through.
 -- The refs/heads path avoids the stale CDN copy served for the short /main/ URL.
-local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=16"
-local MIN_LAYOUT_REVISION = 16
+local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=17"
+local MIN_LAYOUT_REVISION = 17
 
 local function IsPlusLibrary(library)
     return type(library) == "table"
@@ -2868,7 +2868,7 @@ local ApexVersion = tostring(ApexLibrary.Version or "V3.7 PLUS")
 ApexVersion = ApexVersion:gsub("^APEX_SYS%s*", "")
 
 local MyWindow = ApexLibrary.new({
-    Title = "Dandys World // Menu",
+    Title = "DANDYS WORLD // LUNARIS HUB",
     BrandText = "Apex Lib // " .. ApexVersion,
     StatusText = "READY",
     AccentColor = Color3.fromRGB(255, 85, 0),
@@ -3191,50 +3191,6 @@ local TabDefinitions = {
                 "PLAYER SPY NOTE",
                 "Data comes from workspace.InGamePlayers. Players without run data are ignored.",
                 64
-            )
-        end
-    },
-    {
-        Name = "CONFIG",
-        Subtitle = "INTERFACE PREFERENCES",
-        Build = function(tab)
-            -- Reference layout first: keybind + fixed kill button.
-            if not UserInputService.TouchEnabled then
-                tab:CreateKeybindCard()
-            end
-            tab:CreateKillButton("KILL SCRIPT & CLEANUP", function()
-                MyWindow:Unload()
-            end)
-
-            -- Remaining settings stay in CONFIG and scroll below the fold.
-            tab:CreateColorPicker(
-                "ACCENT_COLOR",
-                "Change the overall system color",
-                MyWindow.AccentColor,
-                function(color)
-                    MyWindow:SetAccentColor(color)
-                end
-            )
-
-            if UserInputService.TouchEnabled then
-                tab:CreateToggle(
-                    "LOCK_BUTTON_POSITION",
-                    "Lock mobile menu button position",
-                    MyWindow.IsButtonLocked,
-                    function(state)
-                        MyWindow.IsButtonLocked = state
-                        MyWindow:SaveSettings()
-                    end
-                )
-            end
-
-            tab:CreateInfoCard("LIBRARY_VERSION", ApexLibrary.Version or "APEX_SYS V3.7 PLUS")
-            tab:CreateInfoCard("SCRIPT_VERSION", "DANDYS WORLD // APEX 1.0")
-            tab:CreateInfoCard("AUTHOR", "Drk_Duck")
-            tab:CreateReadMeCard(
-                "CONFIG STORAGE",
-                "UI settings persist to ApexLibrary_Config.json. Script toggles, ESP colors, and ESP transparency persist to DandysWorld_Apex_Config.json.",
-                76
             )
         end
     }
