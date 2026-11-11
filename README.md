@@ -1,6 +1,6 @@
-# Dandy's World + Creatures of Sonaria + Bug Evolution — APEX
+# Lunaris Hub — Bug Evolution / Creatures of Sonaria / Dandy's World
 
-Multi-script hub for three games, all using the **APEX_SYS V3.8 PLUS** terminal interface and the same shared UI profile.
+Multi-script hub for three games, all using the **APEX_SYS V3.8 PLUS** terminal interface and the same shared UI profile. Every menu is branded `{game} // Lunaris Hub`.
 
 ## Scripts
 
@@ -15,10 +15,10 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/DrayFKYT/DandysWorld-
 Tabs: `FARM`, `EVENTS`, `STATS`, `VISUALS`, `INFO`, `CONFIG`.
 
 - Auto bug attack with boss / zone / size priority, plus auto breakables
-- XP, void, and rainbow orb collection through real touch interests
+- XP, void, and rainbow orb collection through exact-position touch interests; the combat loops yield while a pickup is in flight instead of teleporting the character away
 - Auto ability 1/2 and auto stealth casting using the server's ability slots
-- Speed, jump, CFrame flight, infinite jump, and infinite stamina
-- Local ghost mode, player / bug / orb / breakable ESP with independent color pickers
+- Speed, jump, camera-relative CFrame flight (WASD + Space/LeftShift), infinite jump, and infinite stamina
+- Local ghost mode, player / bug / orb / breakable ESP with independent color pickers and a 40 Hz refresh
 - Void guard recovers from off-map falls, returning to the current bug target without resetting its timer
 - Playtime reward claiming and void spinner helpers
 
@@ -78,7 +78,7 @@ The interface is provided by [Apex-Gui-library](https://github.com/DrayFKYT/Apex
 https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua
 ```
 
-All scripts download revision 16 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 16 adds a library-owned `CONFIG` tab that is pinned last and selected whenever the menu opens. It carries the mandatory anti-AFK guard and the shared UI settings, merges settings from every APEX script instead of overwriting them, and cannot be created, renamed, or edited by scripts. Numeric components accept an optional `{ Min, Max, Integer }` options table and snap over-limit values back to the cap. Revision 15 kept fullscreen as a centered panel that is 50% of the usable screen width and 70% of its height with two tab panes side by side. Click a tab to arm it; a `+` button pops up on both panes, and pressing one places the tab on that side. Assigning a tab that already occupies the other pane swaps the two sides, and the placement prompt closes after a side is chosen. Wide fullscreen panels fit more tabs before the tab bar scrolls. The window still animates between layouts and the mobile claw toggle stays layered above it. Revision 14 added the per-pane placement flow; revision 13 introduced the split fullscreen panel; revision 12 added the animated header fullscreen glyph; revision 11 added `Tab:CreateKeybindButton` rows with optional action buttons and clear buttons, and `ShowAction = false` leaves a keybind-only row.
+All scripts download revision 17 of the library on startup, with a local `ApexLibraryPlus.lua` fallback for development. Revision 17 marks the whole Apex tree `NoSkin` before it is parented, so games that skin `PlayerGui` can no longer recolor buttons or break the color picker, keeps `CONFIG` pinned last but only opens it on first load (minimizing and reopening preserves the last active tab), gives kill-button tabs the full fullscreen content height, adds the kill button to `CONFIG`, and gates the menu keybind to desktop and the mobile lock to touch devices. Revision 16 added the library-owned `CONFIG` tab with the mandatory anti-AFK guard and shared UI settings, merging settings from every APEX script instead of overwriting them. Numeric components accept an optional `{ Min, Max, Integer }` options table and snap over-limit values back to the cap. Revision 15 kept fullscreen as a centered panel that is 50% of the usable screen width and 70% of its height with two tab panes side by side. Click a tab to arm it; a `+` button pops up on both panes, and pressing one places the tab on that side. Assigning a tab that already occupies the other pane swaps the two sides, and the placement prompt closes after a side is chosen. Wide fullscreen panels fit more tabs before the tab bar scrolls. The window still animates between layouts and the mobile claw toggle stays layered above it. Revision 14 added the per-pane placement flow; revision 13 introduced the split fullscreen panel; revision 12 added the animated header fullscreen glyph; revision 11 added `Tab:CreateKeybindButton` rows with optional action buttons and clear buttons, and `ShowAction = false` leaves a keybind-only row.
 
 ## Documentation
 
@@ -105,7 +105,7 @@ Autofarm safety runs away from the current attacker (or the combined direction o
 
 - Default menu keybind: `RightControl` (mandatory, no clear button)
 - Default ragdoll keybinds: `R` to ragdoll, `U` to unragdoll (optional, clearable)
-- The `CONFIG` tab is owned by the library, always appears last, and always opens when the menu is shown
+- The `CONFIG` tab is owned by the library, always appears last, and opens on first load; reopening the menu preserves the last active tab
 - Anti-AFK is mandatory, always stored in `ApexLibrary_Config.json`, and applies to every APEX script
 - Every script includes a fixed `KILL SCRIPT & CLEANUP` action in `CONFIG`
 - Original Creatures of Sonaria gameplay logic and credit belong to **Drk_Duck**

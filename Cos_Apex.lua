@@ -27,15 +27,15 @@
         and loads it automatically. Local copies are only a fallback.
 
     Library URL:
-        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=16
+        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=17
 ]================================================================]--
 
 -- // Apex Library Loader
 -- The version query bypasses executor HTTP caches that still hold an old
 -- library. MIN_LAYOUT_REVISION rejects stale copies that slip through.
 -- The refs/heads path avoids the stale CDN copy served for the short /main/ URL.
-local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=16"
-local MIN_LAYOUT_REVISION = 16
+local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=17"
+local MIN_LAYOUT_REVISION = 17
 
 local function IsPlusLibrary(library)
     return type(library) == "table"
@@ -187,7 +187,7 @@ local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerName = LocalPlayer.Name
 
-local SCRIPT_VERSION = "COS // APEX 1.5"
+local SCRIPT_VERSION = "CREATURES OF SONARIA // LUNARIS HUB 1.5"
 local AUTHOR = "Drk_Duck"
 local ConfigFile = "Cos_Apex_Config.json"
 local CONFIG_VERSION = 5
@@ -3994,7 +3994,7 @@ local function BuildUI()
     ApexVersion = ApexVersion:gsub("^APEX_SYS%s*", "")
 
     MyWindow = ApexLibrary.new({
-        Title = "Creatures of Sonaria // Lunaris HUB",
+        Title = "CREATURES OF SONARIA // LUNARIS HUB",
         BrandText = AUTHOR .. " // " .. ApexVersion,
         StatusText = "BOOTING",
         AccentColor = Color3.fromRGB(255, 85, 0),
@@ -5213,67 +5213,16 @@ local function BuildUI()
         )
     end)
 
-    -- CONFIG ---------------------------------------------------------------
-    BuildTab("CONFIG", "INTERFACE & STORAGE", function(tab)
-        if not UserInputService.TouchEnabled then
-            tab:CreateKeybindButton(
-                "OPEN / CLOSE MENU",
-                "Mandatory window keybind. Click the key chip to rebind. This binding cannot be cleared.",
-                {
-                    Key = MyWindow.CurrentHideKey,
-                    Required = true,
-                    TriggerOnKey = false,
-                    ShowAction = false,
-                    OnKeyChanged = function(key)
-                        if key then
-                            MyWindow.CurrentHideKey = key
-                            MyWindow:SaveSettings()
-                        end
-                    end
-                }
-            )
-        end
-        tab:CreateKillButton("KILL SCRIPT & CLEANUP", function()
-            MyWindow:Unload()
-        end)
-
-        tab:CreateColorPicker(
-            "ACCENT_COLOR",
-            "Change the shared APEX system color",
-            MyWindow.AccentColor,
-            function(color)
-                MyWindow:SetAccentColor(color)
-            end
-        )
-
-        if UserInputService.TouchEnabled then
-            tab:CreateToggle(
-                "LOCK_BUTTON_POSITION",
-                "Lock the mobile APEX claw button position",
-                MyWindow.IsButtonLocked,
-                function(state)
-                    MyWindow.IsButtonLocked = state
-                    MyWindow:SaveSettings()
-                end
-            )
-        end
-
-        tab:CreateInfoCard("LIBRARY_VERSION", ApexLibrary.Version or "APEX_SYS")
-        tab:CreateInfoCard("SCRIPT_VERSION", SCRIPT_VERSION)
-        tab:CreateInfoCard("AUTHOR", AUTHOR)
-        tab:CreateReadMeCard(
-            "CONFIG STORAGE",
-            "APEX accent, hide key, mobile lock, and button position use the shared ApexLibrary_Config.json. Cos toggles, speeds, ESP colors, and tuning use Cos_Apex_Config.json.",
-            88
-        )
-    end)
+    -- CONFIG is library-owned. ApexLibraryPlus pins its own CONFIG tab with
+    -- anti-AFK, the hide-key card, the shared accent picker, the mobile lock,
+    -- and the kill button; scripts must not create a second one.
 
     local selected = pcall(function()
-        MyWindow:SelectTab("MAIN", true)
+        MyWindow:SelectTab("CONFIG", true)
     end)
     if not selected then
         pcall(function()
-            MyWindow:SelectTab("MAIN")
+            MyWindow:SelectTab("CONFIG")
         end)
     end
 

@@ -22,12 +22,12 @@
         and loads it automatically. Local copies are only a fallback.
 
     Library URL
-        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=16
+        https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=17
 ]================================================================]--
 
 -- // Apex Library Loader
-local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=16"
-local MIN_LAYOUT_REVISION = 16
+local LIBRARY_URL = "https://raw.githubusercontent.com/DrayFKYT/Apex-Gui-library/refs/heads/main/ApexLibraryPlus.lua?v=17"
+local MIN_LAYOUT_REVISION = 17
 
 local function IsPlusLibrary(library)
     return type(library) == "table"
@@ -177,7 +177,7 @@ local Workspace = game:GetService("Workspace")
 local StarterGui = game:GetService("StarterGui")
 
 local LocalPlayer = Players.LocalPlayer
-local SCRIPT_VERSION = "BUG EVOLUTION // APEX 1.0"
+local SCRIPT_VERSION = "BUG EVOLUTION // LUNARIS HUB 1.0"
 local AUTHOR = "Drk_Duck"
 local ConfigFile = "BugEvolution_Config.json"
 local CONFIG_VERSION = 1
@@ -450,6 +450,14 @@ end
 -- // Shared state used by the combat loops and the void guard
 local BugTarget = { Model = nil, Since = 0, LastPos = nil }
 local BreakTarget = { Model = nil, Since = 0, AttackAt = 0 }
+-- Set while the orb collector is mid-touch. Combat loops yield instead of
+-- teleporting the character back before the server sees the orb touch.
+local OrbBusy = false
+-- Symmetric guard: set while a combat loop is repositioning and firing. The
+-- orb collector yields so the server sees the new position before validating
+-- the attack remote, otherwise every attack fired right after an orb teleport
+-- is rejected for being out of range.
+local CombatBusy = false
 local SessionKills = 0
 local SessionBreaks = 0
 local DebugCounters = {
@@ -462,6 +470,7 @@ local LastSafeCFrame = nil
 local LastVoidRecovery = 0
 local VoidRecoveries = 0
 local ESPAccumulator = 0
+local ESPEntryCount = 0
 
 -- // Status notifications
 local ApexWindow = nil
@@ -889,6 +898,9 @@ task.spawn(function()
         if not humanoid or not root or not bugsFolder then
             continue
         end
+        if OrbBusy then
+            continue
+        end
 
         if BugTarget.Model and not IsBugAlive(BugTarget.Model, bugsFolder) then
             SessionKills = SessionKills + 1
@@ -926,8 +938,10 @@ task.spawn(function()
 
         local distance = (root.Position - bugRoot.Position).Magnitude
         local desired = math.clamp(Values.AttackRange, 2, 34)
-        if distance > desired + 2 or not BugTarget.LastPos
-            or (bugRoot.Position - BugTarget.LastPos).Magnitude > 8 then
+        local needsReposition = distance > desired + 2 or not BugTarget.LastPos
+            or (bugRoot.Position - BugTarget.LastPos).Magnitude > 8
+        local standCFrame = nil
+        if needsReposition then
             local direction = root.Position - bugRoot.Position
             if direction.Magnitude < 0.1 then
                 direction = Vector3.new(0, 0, 1)
@@ -938,13 +952,26 @@ task.spawn(function()
             end
             flat = flat.Unit * desired
             local stand = bugRoot.Position + flat + Vector3.new(0, 4, 0)
-            root.CFrame = CFrame.lookAt(stand, bugRoot.Position)
-            BugTarget.LastPos = bugRoot.Position
+            standCFrame = CFrame.lookAt(stand, bugRoot.Position)
         end
 
         if os.clock() >= nextAttack then
-            FireAttack(bug.Name)
+            CombatBusy = true
+            if standCFrame then
+                root.CFrame = standCFrame
+                BugTarget.LastPos = bugRoot.Position
+                -- The server validates the attack against the replicated
+                -- position, so give it a moment to see the new CFrame.
+                task.wait(0.16)
+            end
+            if BugTarget.Model == bug and IsBugAlive(bug, bugsFolder) then
+                FireAttack(bug.Name)
+            end
             nextAttack = os.clock() + 0.9
+            CombatBusy = false
+        elseif standCFrame then
+            root.CFrame = standCFrame
+            BugTarget.LastPos = bugRoot.Position
         end
     end
 end)
@@ -962,6 +989,9 @@ task.spawn(function()
 
         local _, humanoid, root = GetCharacter()
         if not humanoid or not root then
+            continue
+        end
+        if OrbBusy then
             continue
         end
 
@@ -993,88 +1023,180 @@ task.spawn(function()
             continue
         end
 
+        local moveCFrame = nil
         if (root.Position - hitbox.Position).Magnitude > 8 then
-            root.CFrame = CFrame.new(hitbox.Position + Vector3.new(0, 5, 0))
+            moveCFrame = CFrame.new(hitbox.Position + Vector3.new(0, 5, 0))
         end
 
         if os.clock() >= BreakTarget.AttackAt then
-            FireAttack(breakable.Name)
+            CombatBusy = true
+            if moveCFrame then
+                root.CFrame = moveCFrame
+                -- Reposition first; the server rejects attacks sent before
+                -- the new position replicates.
+                task.wait(0.16)
+            end
+            if BreakTarget.Model == breakable and IsBreakableAlive(breakable, folder) then
+                FireAttack(breakable.Name)
+            end
             BreakTarget.AttackAt = os.clock() + 0.9
+            CombatBusy = false
+        elseif moveCFrame then
+            root.CFrame = moveCFrame
         end
     end
 end)
 
--- // Orb collection loop. Auto bug and auto breakables take priority so orb
--- // teleports cannot interrupt an active combat target.
+-- // Orb collection loop. Runs independently of auto bug/auto break: the
+-- combat loops yield while OrbBusy is set so they cannot teleport the
+-- character away between the orb teleport and the touch interest. The old
+-- version skipped forever whenever auto bug had a target, which is why none
+-- of the orb toggles collected anything during normal farming.
+local OrbDefinitions = {
+    { Folder = "VoidOrbs", Toggle = "AutoVoidOrb", Bonus = 120 },
+    { Folder = "RainbowOrbs", Toggle = "AutoRainbowOrb", Bonus = 60 },
+    { Folder = "Orbs", Toggle = "AutoXPOrb", Bonus = 0 },
+}
+
+-- Orbs that failed a touch are skipped for a few seconds. Without this the
+-- nearest-orb pick could sit on one unreachable orb forever, retrying every
+-- 0.5 seconds and never collecting anything else.
+local OrbRetryAfter = {}
+local COMBAT_ORB_RADIUS = 150
+
+local function FindOrbTarget(origin, anchor)
+    local best, bestPosition, bestScore = nil, nil, math.huge
+    local now = os.clock()
+    for _, definition in ipairs(OrbDefinitions) do
+        if State[definition.Toggle] then
+            local folder = Workspace:FindFirstChild(definition.Folder)
+            if folder then
+                for _, orb in ipairs(folder:GetChildren()) do
+                    local retryAt = OrbRetryAfter[orb]
+                    if not retryAt or now >= retryAt then
+                        local position = GetOrbPosition(orb)
+                        if position then
+                            -- While a combat loop owns a live target, only
+                            -- take XP orbs near that fight. Crossing the map
+                            -- on every pickup starves auto attack. Void and
+                            -- rainbow orbs are rare and worth a detour.
+                            local inRange = not anchor
+                                or definition.Bonus > 0
+                                or (position - anchor).Magnitude <= COMBAT_ORB_RADIUS
+                            if inRange then
+                                local distance = (position - origin).Magnitude
+                                -- Void/rainbow orbs earn a detour; otherwise
+                                -- the nearest enabled orb wins so XP collection
+                                -- keeps moving instead of crossing the map.
+                                local score = distance - definition.Bonus
+                                if score < bestScore then
+                                    best, bestPosition, bestScore = orb, position, score
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best, bestPosition
+end
+
 task.spawn(function()
     local lastOrb = nil
     local lastOrbAt = 0
     while SessionActive() do
-        task.wait(0.12)
+        task.wait(0.08)
         if not (State.AutoXPOrb or State.AutoVoidOrb or State.AutoRainbowOrb) then
+            OrbBusy = false
             lastOrb = nil
             continue
         end
-        if State.AutoBug and BugTarget.Model then
-            continue
-        end
-        if State.AutoBreak and BreakTarget.Model then
+        -- CFrame flight owns the character position; orb teleports would
+        -- fight the fly loop and snap right back.
+        if State.Fly or CombatBusy then
+            OrbBusy = false
             continue
         end
 
         local _, humanoid, root = GetCharacter()
-        if not humanoid or not root then
+        if not humanoid or not root or humanoid.Health <= 0 then
+            OrbBusy = false
             continue
         end
 
-        local folder, useValue = nil, false
-        local voidFolder = Workspace:FindFirstChild("VoidOrbs")
-        local rainbowFolder = Workspace:FindFirstChild("RainbowOrbs")
-        local xpFolder = Workspace:FindFirstChild("Orbs")
-
-        if State.AutoVoidOrb and voidFolder and #voidFolder:GetChildren() > 0 then
-            folder = voidFolder
-        elseif State.AutoRainbowOrb and rainbowFolder and #rainbowFolder:GetChildren() > 0 then
-            folder = rainbowFolder
-        elseif State.AutoXPOrb and xpFolder and #xpFolder:GetChildren() > 0 then
-            folder = xpFolder
-            useValue = true
+        -- Drop retry entries for collected orbs and expired blacklists.
+        if next(OrbRetryAfter) ~= nil then
+            local now = os.clock()
+            for orb, retryAt in pairs(OrbRetryAfter) do
+                if not orb.Parent or now >= retryAt then
+                    OrbRetryAfter[orb] = nil
+                end
+            end
         end
 
-        if not folder then
-            lastOrb = nil
-            continue
+        -- Keep orb pickups local to the current fight so the combat loops can
+        -- still land their attacks on schedule.
+        local anchor = nil
+        if State.AutoBug and BugTarget.Model then
+            local bugsFolder = Workspace:FindFirstChild("Bugs")
+            if bugsFolder and IsBugAlive(BugTarget.Model, bugsFolder) then
+                local bugRoot = GetBugRoot(BugTarget.Model)
+                anchor = bugRoot and bugRoot.Position or nil
+            end
+        end
+        if not anchor and State.AutoBreak and BreakTarget.Model then
+            local breakFolder = Workspace:FindFirstChild("Breakables")
+            if breakFolder and IsBreakableAlive(BreakTarget.Model, breakFolder) then
+                local hitbox = BreakTarget.Model:FindFirstChild("Hitbox")
+                    or BreakTarget.Model:FindFirstChildWhichIsA("BasePart", true)
+                anchor = hitbox and hitbox.Position or nil
+            end
         end
 
-        local orb, position = FindOrb(folder, useValue)
+        local orb, position = FindOrbTarget(root.Position, anchor)
         if not orb or not position then
+            OrbBusy = false
             lastOrb = nil
             continue
         end
 
-        if orb == lastOrb and os.clock() - lastOrbAt < 1 then
-            task.wait(0.1)
+        -- If the pickup failed, retry the same orb after a short pause; if it
+        -- succeeded the orb is gone and the next candidate is selected.
+        if orb == lastOrb and os.clock() - lastOrbAt < 0.5 then
+            OrbBusy = false
             continue
         end
 
-        root.CFrame = CFrame.new(position + Vector3.new(0, 2.5, 0))
+        OrbBusy = true
         lastOrb = orb
         lastOrbAt = os.clock()
-        task.wait(0.18)
+        -- Put the root centre on the orb. The old +2.5 offset left a 0.8-stud
+        -- orb outside the root hitbox on some characters.
+        root.CFrame = CFrame.new(position)
+        task.wait(0.05)
 
-        if orb.Parent and type(firetouchinterest) == "function" then
+        if orb.Parent then
             local touchPart = orb:IsA("BasePart") and orb
                 or orb:FindFirstChild("Hit")
                 or orb:FindFirstChildWhichIsA("BasePart", true)
-            if touchPart then
+            if touchPart and type(firetouchinterest) == "function" then
                 pcall(function()
                     firetouchinterest(root, touchPart, 0)
-                    task.wait(0.04)
+                    task.wait(0.03)
                     firetouchinterest(root, touchPart, 1)
                 end)
             end
         end
-        task.wait(0.06)
+        task.wait(0.1)
+        if orb.Parent then
+            -- The touch did not collect it. Blacklist briefly and move on to
+            -- a different orb instead of retrying this one forever.
+            OrbRetryAfter[orb] = os.clock() + 3
+        else
+            OrbRetryAfter[orb] = nil
+        end
+        OrbBusy = false
     end
 end)
 
@@ -1196,32 +1318,101 @@ RunService.Heartbeat:Connect(function(deltaTime)
     end
 end)
 
--- // Custom CFrame flight (independent of the game's flight permission)
+-- // Custom CFrame flight (independent of the game's flight permission).
+-- Mirrors the proven Cos_Apex implementation: track raw WASD/Space/LeftShift,
+-- move relative to the camera, and keep an accumulated fly position so the
+-- character does not drift or get pulled back by the game's controllers.
+local FlyInputs = {
+    W = false,
+    A = false,
+    S = false,
+    D = false,
+    Space = false,
+    LeftShift = false
+}
+local FlyPosition = nil
+local FlyRoot = nil
+local FLY_RESYNC_DISTANCE = 30
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed or not SessionActive() then
+        return
+    end
+    local key = input.KeyCode.Name
+    if FlyInputs[key] ~= nil then
+        FlyInputs[key] = true
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    local key = input.KeyCode.Name
+    if FlyInputs[key] ~= nil then
+        FlyInputs[key] = false
+    end
+end)
+
+local function ClearFlyState()
+    FlyPosition = nil
+    FlyRoot = nil
+    for key in pairs(FlyInputs) do
+        FlyInputs[key] = false
+    end
+end
+
 RunService.RenderStepped:Connect(function(deltaTime)
     if not SessionActive() or not State.Fly then
+        FlyPosition = nil
+        FlyRoot = nil
         return
     end
     local _, humanoid, root = GetCharacter()
     if not humanoid or not root then
+        FlyPosition = nil
+        FlyRoot = nil
         return
     end
-    local speed = Values.FlySpeed
-    local move = Vector3.zero
-    if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-        move = move + Vector3.new(0, speed, 0)
+
+    if FlyRoot ~= root or not FlyPosition then
+        FlyRoot = root
+        FlyPosition = root.Position
+    elseif (root.Position - FlyPosition).Magnitude > FLY_RESYNC_DISTANCE then
+        -- External teleport (orb collection, respawn, scripted move): adopt
+        -- the new position instead of snapping back to the old flight path.
+        FlyPosition = root.Position
     end
-    if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
-        or UserInputService:IsKeyDown(Enum.KeyCode.C) then
-        move = move - Vector3.new(0, speed, 0)
+
+    local camera = Workspace.CurrentCamera
+    if not camera then
+        return
     end
-    local direction = humanoid.MoveDirection
-    if direction.Magnitude > 0.05 then
-        move = move + direction.Unit * speed
+
+    local move = Vector3.new(0, 0, 0)
+    if FlyInputs.W then
+        move = move + camera.CFrame.LookVector
     end
-    if move.Magnitude > 0.01 then
-        root.CFrame = root.CFrame + move * deltaTime
-        root.Velocity = Vector3.zero
+    if FlyInputs.S then
+        move = move - camera.CFrame.LookVector
     end
+    if FlyInputs.D then
+        move = move + camera.CFrame.RightVector
+    end
+    if FlyInputs.A then
+        move = move - camera.CFrame.RightVector
+    end
+    if FlyInputs.Space then
+        move = move + Vector3.new(0, 1, 0)
+    end
+    if FlyInputs.LeftShift then
+        move = move - Vector3.new(0, 1, 0)
+    end
+    if move.Magnitude > 0 then
+        move = move.Unit
+    end
+
+    FlyPosition = FlyPosition + move * Values.FlySpeed * deltaTime
+    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    root.CFrame = CFrame.new(FlyPosition) * root.CFrame.Rotation
 end)
 
 -- // Local ghost mode
@@ -1265,15 +1456,36 @@ local function RestoreGhost()
     GhostBillboards = {}
 end
 
--- // Infinite jump
+-- // Infinite jump. ChangeState alone can be swallowed while the humanoid is
+-- falling or the game has the jumping state disabled, so re-enable it and
+-- apply an upward impulse derived from the configured jump power.
 UserInputService.JumpRequest:Connect(function()
     if not SessionActive() or not State.InfiniteJump or State.Fly then
         return
     end
-    local _, humanoid = GetCharacter()
-    if humanoid then
-        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+    local _, humanoid, root = GetCharacter()
+    if not humanoid or not root or humanoid.Health <= 0 then
+        return
     end
+    local lift
+    if humanoid.UseJumpPower == false then
+        lift = math.sqrt(2 * (Workspace.Gravity or 196.2) * (humanoid.JumpHeight or 7.2))
+    else
+        lift = Spoof.JumpPower and Values.JumpPower or humanoid.JumpPower
+    end
+    if type(lift) ~= "number" or lift ~= lift or lift <= 0 then
+        lift = 50
+    end
+    pcall(function()
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+    end)
+    humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+    local velocity = root.AssemblyLinearVelocity
+    root.AssemblyLinearVelocity = Vector3.new(
+        velocity.X,
+        math.max(velocity.Y, lift),
+        velocity.Z
+    )
 end)
 
 -- // ESP system
@@ -1327,6 +1539,7 @@ local function ClearAllESP()
 end
 
 local function UpdateESPEntry(store, key, position, label, color, showText, showTracer, camera, viewport, now)
+    ESPEntryCount = ESPEntryCount + 1
     local entry = store[key]
     if not entry then
         entry = CreateESPEntry()
@@ -1379,6 +1592,7 @@ local function UpdateESP()
     local origin = myRoot and myRoot.Position or Vector3.zero
     local maxDistance = Values.ESPDistance
     local now = os.clock()
+    ESPEntryCount = 0
 
     -- Players
     if State.ESPPlayers or State.ESPPlayerTracers then
@@ -1422,34 +1636,52 @@ local function UpdateESP()
     local bugsFolder = Workspace:FindFirstChild("Bugs")
     if State.ESPBugs or State.ESPBugTracers then
         if bugsFolder then
+            local candidates = {}
             for _, bug in ipairs(bugsFolder:GetChildren()) do
                 local bugRoot = GetBugRoot(bug)
                 local humanoid = bug:FindFirstChildOfClass("Humanoid")
-                if bugRoot and humanoid and humanoid.Health > 0
-                    and (bugRoot.Position - origin).Magnitude <= maxDistance then
-                    local label = string.format(
-                        "%s | %d/%d | %s",
-                        tostring(bug.Name),
-                        math.floor(humanoid.Health + 0.5),
-                        math.floor(humanoid.MaxHealth + 0.5),
-                        tostring(bug:GetAttribute("Zone") or "?")
-                    )
-                    if bug:GetAttribute("Boss") == true then
-                        label = "[BOSS] " .. label
+                if bugRoot and humanoid and humanoid.Health > 0 then
+                    local distance = (bugRoot.Position - origin).Magnitude
+                    if distance <= maxDistance then
+                        candidates[#candidates + 1] = {
+                            Bug = bug,
+                            Root = bugRoot,
+                            Humanoid = humanoid,
+                            Distance = distance,
+                        }
                     end
-                    UpdateESPEntry(
-                        ESPStores.Bugs,
-                        bug,
-                        bugRoot.Position + Vector3.new(0, 4, 0),
-                        label,
-                        Colors.BugESP,
-                        State.ESPBugs,
-                        State.ESPBugTracers,
-                        camera,
-                        viewport,
-                        now
-                    )
                 end
+            end
+            table.sort(candidates, function(a, b)
+                return a.Distance < b.Distance
+            end)
+            local limit = math.min(#candidates, 140)
+            for index = 1, limit do
+                local candidate = candidates[index]
+                local bug = candidate.Bug
+                local humanoid = candidate.Humanoid
+                local label = string.format(
+                    "%s | %d/%d | %s",
+                    tostring(bug.Name),
+                    math.floor(humanoid.Health + 0.5),
+                    math.floor(humanoid.MaxHealth + 0.5),
+                    tostring(bug:GetAttribute("Zone") or "?")
+                )
+                if bug:GetAttribute("Boss") == true then
+                    label = "[BOSS] " .. label
+                end
+                UpdateESPEntry(
+                    ESPStores.Bugs,
+                    bug,
+                    candidate.Root.Position + Vector3.new(0, 4, 0),
+                    label,
+                    Colors.BugESP,
+                    State.ESPBugs,
+                    State.ESPBugTracers,
+                    camera,
+                    viewport,
+                    now
+                )
             end
         end
         CleanupESPStore(ESPStores.Bugs, now)
@@ -1486,7 +1718,7 @@ local function UpdateESP()
         table.sort(candidates, function(a, b)
             return a.Distance < b.Distance
         end)
-        local limit = math.min(#candidates, 140)
+        local limit = math.min(#candidates, 100)
         for index = 1, limit do
             local candidate = candidates[index]
             local value = candidate.Orb:GetAttribute("XP")
@@ -1565,7 +1797,7 @@ local function UpdateESP()
             table.sort(candidates, function(a, b)
                 return a.Distance < b.Distance
             end)
-            local limit = math.min(#candidates, 140)
+            local limit = math.min(#candidates, 100)
             for index = 1, limit do
                 local candidate = candidates[index]
                 local breakable = candidate.Breakable
@@ -1601,7 +1833,11 @@ RunService.RenderStepped:Connect(function(deltaTime)
         return
     end
     ESPAccumulator = ESPAccumulator + deltaTime
-    if ESPAccumulator >= 0.08 then
+    -- 40 Hz refresh instead of the old 12.5 Hz keeps text and tracers glued to
+    -- moving targets. Dense scenes (all ESP categories on, hundreds of nearby
+    -- targets) drop to 25 Hz so the drawing work cannot halve the frame rate.
+    local interval = ESPEntryCount > 240 and 0.04 or 0.025
+    if ESPAccumulator >= interval then
         ESPAccumulator = 0
         UpdateESP()
     end
@@ -1609,8 +1845,8 @@ end)
 
 -- // UI
 ApexWindow = ApexLibrary.new({
-    Title = "BUG EVOLUTION // APEX",
-    BrandText = "BUG_EVO // RH",
+    Title = "BUG EVOLUTION // LUNARIS HUB",
+    BrandText = "BUG_EVO // LUNARIS HUB",
     StatusText = "READY",
 })
 
@@ -1859,9 +2095,11 @@ end
 FeatureApply.Fly = function(enabled)
     Spoof.CanFly = enabled
     if not enabled then
+        ClearFlyState()
         local _, _, root = GetCharacter()
         if root then
-            root.Velocity = Vector3.zero
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
         end
     end
 end
