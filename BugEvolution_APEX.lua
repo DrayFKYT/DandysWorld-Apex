@@ -1052,6 +1052,8 @@ end)
 -- character away between the orb teleport and the touch interest. The old
 -- version skipped forever whenever auto bug had a target, which is why none
 -- of the orb toggles collected anything during normal farming.
+-- Ordered by collection priority. XP is intentionally last so a nearby XP orb
+-- can never outrank an available void or sand orb.
 local OrbDefinitions = {
     { Folder = "VoidOrbs", Toggle = "AutoVoidOrb", Bonus = 120 },
     { Folder = "SandOrbs", Toggle = "AutoSandOrb", Bonus = 60 },
@@ -1081,10 +1083,12 @@ local OrbRetryAfter = {}
 local COMBAT_ORB_RADIUS = 150
 
 local function FindOrbTarget(origin, anchor)
-    local best, bestPosition, bestScore = nil, nil, math.huge
     local now = os.clock()
     local sandReady = CanCollectSandOrbs()
     local voidReady = CanCollectVoidOrbs()
+    -- OrbDefinitions is ordered by priority. Return the best orb from the
+    -- first enabled category that has one, so XP always stays at the bottom:
+    -- a nearby XP orb can never beat an available void or sand orb.
     for _, definition in ipairs(OrbDefinitions) do
         local ready = true
         if definition.Folder == "SandOrbs" then
@@ -1094,36 +1098,35 @@ local function FindOrbTarget(origin, anchor)
         end
         if ready and State[definition.Toggle] then
             local folder = Workspace:FindFirstChild(definition.Folder)
+            local best, bestPosition, bestDistance = nil, nil, math.huge
             if folder then
                 for _, orb in ipairs(folder:GetChildren()) do
                     local retryAt = OrbRetryAfter[orb]
                     if not retryAt or now >= retryAt then
                         local position = GetOrbPosition(orb)
                         if position then
-                            -- While a combat loop owns a live target, only
-                            -- take XP orbs near that fight. Crossing the map
-                            -- on every pickup starves auto attack. Void and
-                            -- sand orbs are rare and worth a detour.
+                            -- While a combat loop owns a live target, XP orbs
+                            -- are only taken near that fight. Void and sand
+                            -- are rare and may detour across the map.
                             local inRange = not anchor
                                 or definition.Bonus > 0
                                 or (position - anchor).Magnitude <= COMBAT_ORB_RADIUS
                             if inRange then
                                 local distance = (position - origin).Magnitude
-                                -- Void/sand orbs earn a detour; otherwise
-                                -- the nearest enabled orb wins so XP collection
-                                -- keeps moving instead of crossing the map.
-                                local score = distance - definition.Bonus
-                                if score < bestScore then
-                                    best, bestPosition, bestScore = orb, position, score
+                                if distance < bestDistance then
+                                    best, bestPosition, bestDistance = orb, position, distance
                                 end
                             end
                         end
                     end
                 end
             end
+            if best then
+                return best, bestPosition
+            end
         end
     end
-    return best, bestPosition
+    return nil, nil
 end
 
 task.spawn(function()
@@ -1713,9 +1716,8 @@ local function UpdateESP()
         ClearESPStore(ESPStores.Bugs)
     end
 
-    -- Orbs (XP, sand, and rainbow share a pool)
+    -- Orbs (XP and sand share a pool)
     local orbFolder = Workspace:FindFirstChild("Orbs")
-    local rainbowFolder = Workspace:FindFirstChild("RainbowOrbs")
     local sandFolder = Workspace:FindFirstChild("SandOrbs")
     if State.ESPOrbs then
         local candidates = {}
@@ -1735,11 +1737,6 @@ local function UpdateESP()
                 AddOrb(orb, "xp")
             end
         end
-        if rainbowFolder then
-            for _, orb in ipairs(rainbowFolder:GetChildren()) do
-                AddOrb(orb, "rainbow")
-            end
-        end
         if sandFolder then
             for _, orb in ipairs(sandFolder:GetChildren()) do
                 AddOrb(orb, "sand")
@@ -1754,9 +1751,7 @@ local function UpdateESP()
             local value = candidate.Orb:GetAttribute("XP")
                 or candidate.Orb:GetAttribute("Value")
             local label
-            if candidate.Kind == "rainbow" then
-                label = "RAINBOW ORB"
-            elseif candidate.Kind == "sand" then
+            if candidate.Kind == "sand" then
                 label = "SAND ORB +" .. tostring(candidate.Orb:GetAttribute("Credits") or 30)
             else
                 label = "ORB +" .. tostring(value or "?") .. " XP"
@@ -2274,7 +2269,7 @@ BindToggleColor(
     espTab,
     "ESPOrbs",
     "ORB ESP",
-    "Draws XP, Sand, and Rainbow Orbs within the ESP distance. Colour is adjustable.",
+    "Draws XP and Sand Orbs within the ESP distance. Colour is adjustable.",
     "OrbESP"
 )
 BindToggleColor(
