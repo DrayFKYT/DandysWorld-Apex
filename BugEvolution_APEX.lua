@@ -7,7 +7,7 @@
 
     Features
       * Auto bug attack with boss / zone / size priority
-      * Auto breakables, XP orbs, void orbs, rainbow orbs
+      * Auto breakables, XP orbs, void orbs, sand orbs
       * Void spinner, playtime rewards, ability casting
       * Client speed / jump / flight / infinite stamina
       * Infinite jump, local ghost mode, auto stealth casting
@@ -315,7 +315,7 @@ local State = {
     AutoBreak = false,
     AutoXPOrb = false,
     AutoVoidOrb = false,
-    AutoRainbowOrb = false,
+    AutoSandOrb = false,
     AutoSpin = false,
     AutoPlaytime = false,
     AutoAbility1 = false,
@@ -1054,9 +1054,25 @@ end)
 -- of the orb toggles collected anything during normal farming.
 local OrbDefinitions = {
     { Folder = "VoidOrbs", Toggle = "AutoVoidOrb", Bonus = 120 },
-    { Folder = "RainbowOrbs", Toggle = "AutoRainbowOrb", Bonus = 60 },
+    { Folder = "SandOrbs", Toggle = "AutoSandOrb", Bonus = 60 },
     { Folder = "Orbs", Toggle = "AutoXPOrb", Bonus = 0 },
 }
+
+-- The game's SandOrb watcher only accepts a touch while the player is alive,
+-- not in a void fight, and not burrowed, so the collector matches those gates
+-- instead of burning retries on orbs it cannot claim.
+local function CanCollectSandOrbs()
+    local character = LocalPlayer.Character
+    return character ~= nil
+        and LocalPlayer:GetAttribute("Alive") == true
+        and not LocalPlayer:GetAttribute("InVoidFight")
+        and not character:GetAttribute("Burrowed")
+end
+
+local function CanCollectVoidOrbs()
+    return LocalPlayer:GetAttribute("Alive") == true
+        and not LocalPlayer:GetAttribute("InVoidFight")
+end
 
 -- Orbs that failed a touch are skipped for a few seconds. Without this the
 -- nearest-orb pick could sit on one unreachable orb forever, retrying every
@@ -1067,8 +1083,16 @@ local COMBAT_ORB_RADIUS = 150
 local function FindOrbTarget(origin, anchor)
     local best, bestPosition, bestScore = nil, nil, math.huge
     local now = os.clock()
+    local sandReady = CanCollectSandOrbs()
+    local voidReady = CanCollectVoidOrbs()
     for _, definition in ipairs(OrbDefinitions) do
-        if State[definition.Toggle] then
+        local ready = true
+        if definition.Folder == "SandOrbs" then
+            ready = sandReady
+        elseif definition.Folder == "VoidOrbs" then
+            ready = voidReady
+        end
+        if ready and State[definition.Toggle] then
             local folder = Workspace:FindFirstChild(definition.Folder)
             if folder then
                 for _, orb in ipairs(folder:GetChildren()) do
@@ -1079,13 +1103,13 @@ local function FindOrbTarget(origin, anchor)
                             -- While a combat loop owns a live target, only
                             -- take XP orbs near that fight. Crossing the map
                             -- on every pickup starves auto attack. Void and
-                            -- rainbow orbs are rare and worth a detour.
+                            -- sand orbs are rare and worth a detour.
                             local inRange = not anchor
                                 or definition.Bonus > 0
                                 or (position - anchor).Magnitude <= COMBAT_ORB_RADIUS
                             if inRange then
                                 local distance = (position - origin).Magnitude
-                                -- Void/rainbow orbs earn a detour; otherwise
+                                -- Void/sand orbs earn a detour; otherwise
                                 -- the nearest enabled orb wins so XP collection
                                 -- keeps moving instead of crossing the map.
                                 local score = distance - definition.Bonus
@@ -1107,7 +1131,7 @@ task.spawn(function()
     local lastOrbAt = 0
     while SessionActive() do
         task.wait(0.08)
-        if not (State.AutoXPOrb or State.AutoVoidOrb or State.AutoRainbowOrb) then
+        if not (State.AutoXPOrb or State.AutoVoidOrb or State.AutoSandOrb) then
             OrbBusy = false
             lastOrb = nil
             continue
@@ -1689,30 +1713,36 @@ local function UpdateESP()
         ClearESPStore(ESPStores.Bugs)
     end
 
-    -- Orbs (XP and rainbow share a pool)
+    -- Orbs (XP, sand, and rainbow share a pool)
     local orbFolder = Workspace:FindFirstChild("Orbs")
     local rainbowFolder = Workspace:FindFirstChild("RainbowOrbs")
+    local sandFolder = Workspace:FindFirstChild("SandOrbs")
     if State.ESPOrbs then
         local candidates = {}
-        local function AddOrb(orb, isRainbow)
+        local function AddOrb(orb, kind)
             local position = GetOrbPosition(orb)
             if position and (position - origin).Magnitude <= maxDistance then
                 candidates[#candidates + 1] = {
                     Orb = orb,
                     Position = position,
                     Distance = (position - origin).Magnitude,
-                    Rainbow = isRainbow
+                    Kind = kind
                 }
             end
         end
         if orbFolder then
             for _, orb in ipairs(orbFolder:GetChildren()) do
-                AddOrb(orb, false)
+                AddOrb(orb, "xp")
             end
         end
         if rainbowFolder then
             for _, orb in ipairs(rainbowFolder:GetChildren()) do
-                AddOrb(orb, true)
+                AddOrb(orb, "rainbow")
+            end
+        end
+        if sandFolder then
+            for _, orb in ipairs(sandFolder:GetChildren()) do
+                AddOrb(orb, "sand")
             end
         end
         table.sort(candidates, function(a, b)
@@ -1724,8 +1754,10 @@ local function UpdateESP()
             local value = candidate.Orb:GetAttribute("XP")
                 or candidate.Orb:GetAttribute("Value")
             local label
-            if candidate.Rainbow then
+            if candidate.Kind == "rainbow" then
                 label = "RAINBOW ORB"
+            elseif candidate.Kind == "sand" then
+                label = "SAND ORB +" .. tostring(candidate.Orb:GetAttribute("Credits") or 30)
             else
                 label = "ORB +" .. tostring(value or "?") .. " XP"
             end
@@ -1973,12 +2005,12 @@ BindToggle(
 )
 BindToggle(
     farmTab,
-    "AutoRainbowOrb",
-    "AUTO RAINBOW ORBS",
-    "Collects Rainbow Orbs. Runs before normal XP orbs when both are enabled.",
+    "AutoSandOrb",
+    "AUTO SAND ORBS",
+    "Collects Sand Orbs during the sand event. Skips them while dead, burrowed, or in a void fight.",
     nil
 )
-farmTab:CreateInfoCard("PRIORITY", "BUGS / BREAKS > VOID > RAINBOW > XP")
+farmTab:CreateInfoCard("PRIORITY", "BUGS / BREAKS > VOID > SAND > XP")
 
 -- // EVENTS
 local eventTab = ApexWindow:CreateTab("EVENTS", "EVENT // REWARDS")
@@ -2242,7 +2274,7 @@ BindToggleColor(
     espTab,
     "ESPOrbs",
     "ORB ESP",
-    "Draws XP and Rainbow Orbs within the ESP distance. Colour is adjustable.",
+    "Draws XP, Sand, and Rainbow Orbs within the ESP distance. Colour is adjustable.",
     "OrbESP"
 )
 BindToggleColor(

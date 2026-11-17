@@ -15,7 +15,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/DrayFKYT/DandysWorld-
 Tabs: `FARM`, `EVENTS`, `STATS`, `VISUALS`, `INFO`, `CONFIG`.
 
 - Auto bug attack with boss / zone / size priority, plus auto breakables
-- XP, void, and rainbow orb collection through exact-position touch interests; the combat loops yield while a pickup is in flight instead of teleporting the character away
+- XP, void, and sand orb collection through exact-position touch interests; the combat loops yield while a pickup is in flight instead of teleporting the character away
 - Auto ability 1/2 and auto stealth casting using the server's ability slots
 - Speed, jump, camera-relative CFrame flight (WASD + Space/LeftShift), infinite jump, and infinite stamina
 - Local ghost mode, player / bug / orb / breakable ESP with independent color pickers and a 40 Hz refresh
